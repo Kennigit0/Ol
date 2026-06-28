@@ -1,4 +1,5 @@
 import asyncio, time, re, random, requests, base64, io
+import numpy as np
 from PIL import Image
 from telethon import TelegramClient, events
 from telethon.tl.types import ReplyInlineMarkup
@@ -127,70 +128,78 @@ async def explore():
 
 def count_monsters_no_ai(image_bytes):
     """
-    Count monster cards without AI — pure pixel math.
-    All cards in one image share the same artwork, so:
-    1. Find background color (top-left corner)
-    2. Mask every "not background" pixel
-    3. Flood-fill into connected blobs
-    4. Use smallest blob as "1 card" reference size
-    5. Divide each blob's area by that reference → estimated card count
+    Count monster cards without AI — template matching.
+    All cards share identical artwork, so flat-background masking doesn't
+    work on busy photo backgrounds (sky/ocean/forest). Instead:
+    1. Find the patch with highest local variance (busy texture = inside a card)
+    2. Use it as a template, slide it across the whole image
+    3. Compute normalized cross-correlation at every position
+    4. Count distinct peaks above a similarity threshold (with non-max
+       suppression so the same card isn't counted twice)
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-        # Downscale for speed — flood fill is pure python
-        scale = 160 / max(img.size)
+        img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
+        scale = 200 / max(img.size)
         if scale < 1:
             img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
-        w, h = img.size
-        px = img.load()
+        arr = np.array(img, dtype=np.float32)
+        h, w = arr.shape
 
-        bg = px[0, 0]  # background sampled from top-left corner
+        # Estimated card size as a fraction of image (calibrated from real
+        # game screenshots — cards are roughly square thumbnails)
+        card_w = max(8, int(w * 0.19))
+        card_h = max(8, int(h * 0.24))
 
-        def diff(c1, c2):
-            return abs(c1[0]-c2[0]) + abs(c1[1]-c2[1]) + abs(c1[2]-c2[2])
-
-        THRESH = 45
-        mask = [[diff(px[x, y], bg) > THRESH for x in range(w)] for y in range(h)]
-        visited = [[False]*w for _ in range(h)]
-
-        components = []
-        for y in range(h):
-            for x in range(w):
-                if mask[y][x] and not visited[y][x]:
-                    stack = [(x, y)]
-                    visited[y][x] = True
-                    area = 0
-                    while stack:
-                        cx, cy = stack.pop()
-                        area += 1
-                        for dx, dy in ((-1,0),(1,0),(0,-1),(0,1)):
-                            nx, ny = cx+dx, cy+dy
-                            if 0 <= nx < w and 0 <= ny < h and mask[ny][nx] and not visited[ny][nx]:
-                                visited[ny][nx] = True
-                                stack.append((nx, ny))
-                    if area > 8:  # skip tiny noise specks
-                        components.append(area)
-
-        if not components:
+        if h <= card_h or w <= card_w:
             return None
 
-        # Filter noise RELATIVE to the biggest blob — a real card is never
-        # a tiny fraction of the largest one. This fixes the bug where a
-        # 13px antialiasing speck got used as the "card size" reference,
-        # causing a single real card to be wildly overcounted.
-        max_area = max(components)
-        significant = [a for a in components if a >= max(20, max_area * 0.05)]
+        # Find the busiest patch (highest variance) — likely inside a card,
+        # not the smoother sky/ocean/background
+        best_var, best_pos = -1, (0, 0)
+        step = 4
+        for y in range(0, h - card_h, step):
+            for x in range(0, w - card_w, step):
+                patch = arr[y:y+card_h, x:x+card_w]
+                v = patch.var()
+                if v > best_var:
+                    best_var = v
+                    best_pos = (x, y)
 
-        if not significant:
+        tx, ty = best_pos
+        template = arr[ty:ty+card_h, tx:tx+card_w]
+        t_norm   = template - template.mean()
+        t_energy = np.sqrt((t_norm**2).sum())
+        if t_energy < 1e-6:
             return None
 
-        # Default: each significant blob = one card (handles the common
-        # case of separated, non-overlapping cards correctly).
-        total = len(significant)
-        total = min(9, max(1, total))
+        # Vectorized sliding-window normalized cross-correlation
+        from numpy.lib.stride_tricks import sliding_window_view
+        windows  = sliding_window_view(arr, (card_h, card_w))
+        win_mean = windows.mean(axis=(2, 3), keepdims=True)
+        win_norm = windows - win_mean
+        win_energy = np.sqrt((win_norm**2).sum(axis=(2, 3)))
+        numer = (win_norm * t_norm).sum(axis=(2, 3))
+        denom = win_energy * t_energy
+        scores = np.divide(numer, denom, out=np.zeros_like(numer), where=denom > 1e-6)
 
-        log(f"[MONSTER GROUP] No-AI estimate: {total} (all blobs={components}, kept={significant})")
+        THRESH = 0.5
+        ys, xs = np.where(scores > THRESH)
+        if len(xs) == 0:
+            return None
+        candidates = sorted(zip(scores[ys, xs], xs, ys), reverse=True)
+
+        peaks = []
+        for score, x, y in candidates:
+            too_close = False
+            for px, py in peaks:
+                if abs(x - px) < card_w * 0.7 and abs(y - py) < card_h * 0.7:
+                    too_close = True
+                    break
+            if not too_close:
+                peaks.append((x, y))
+
+        total = min(9, max(1, len(peaks)))
+        log(f"[MONSTER GROUP] Template-match estimate: {total} (peaks={peaks})")
         return total
     except Exception as e:
         log(f"[MONSTER GROUP] No-AI count error: {e}")
