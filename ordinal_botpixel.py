@@ -126,7 +126,7 @@ async def explore():
     last_action_time = time.time()
     await client.send_message(BOT, "/explore")
 
-def count_monsters_no_ai(image_bytes):
+def count_monsters_no_ai(image_bytes, max_count=12):
     """
     Count monster cards without AI — template matching.
     All cards share identical artwork, so flat-background masking doesn't
@@ -136,6 +136,10 @@ def count_monsters_no_ai(image_bytes):
     3. Compute normalized cross-correlation at every position
     4. Count distinct peaks above a similarity threshold (with non-max
        suppression so the same card isn't counted twice)
+
+    max_count caps the result to whatever buttons actually exist in that
+    message — don't hardcode a low number since some messages show up to
+    12 options.
     """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
@@ -198,7 +202,7 @@ def count_monsters_no_ai(image_bytes):
             if not too_close:
                 peaks.append((x, y))
 
-        total = min(9, max(1, len(peaks)))
+        total = min(max_count, max(1, len(peaks)))
         log(f"[MONSTER GROUP] Template-match estimate: {total} (peaks={peaks})")
         return total
     except Exception as e:
@@ -643,7 +647,13 @@ async def process(m):
 
         count = None
         if image_bytes:
-            count = count_monsters_no_ai(image_bytes)
+            # Cap to the highest numbered button actually shown — usually
+            # equals len(btns), but compute from the button labels directly
+            # in case of gaps, since some messages show up to 12 options.
+            numeric_btns = [int(b) for b in btns if b.strip().isdigit()]
+            max_count = max(numeric_btns) if numeric_btns else 12
+
+            count = count_monsters_no_ai(image_bytes, max_count=max_count)
             if count is None:
                 log("[MONSTER GROUP] No-AI method failed, trying AI...")
                 count = await count_monsters_with_ai(image_bytes)
