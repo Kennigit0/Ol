@@ -175,24 +175,22 @@ def count_monsters_no_ai(image_bytes):
         if not components:
             return None
 
-        # If multiple blobs exist, the smallest one is likely an isolated
-        # card — use it as the size reference. But if everything merged
-        # into ONE blob (full overlap stack), there's no isolated card to
-        # measure from, so fall back to a fixed estimated card size.
-        FIXED_CARD_AREA = 1800  # approx px² for one card at 160px max-dim scale
+        # Filter noise RELATIVE to the biggest blob — a real card is never
+        # a tiny fraction of the largest one. This fixes the bug where a
+        # 13px antialiasing speck got used as the "card size" reference,
+        # causing a single real card to be wildly overcounted.
+        max_area = max(components)
+        significant = [a for a in components if a >= max(20, max_area * 0.05)]
 
-        if len(components) == 1:
-            card_area = FIXED_CARD_AREA
-        else:
-            components.sort()
-            card_area = components[0]
+        if not significant:
+            return None
 
-        total = 0
-        for area in components:
-            total += max(1, round(area / card_area))
-        total = min(9, max(1, total))  # buttons are always 1-9
+        # Default: each significant blob = one card (handles the common
+        # case of separated, non-overlapping cards correctly).
+        total = len(significant)
+        total = min(9, max(1, total))
 
-        log(f"[MONSTER GROUP] No-AI estimate: {total} (blobs={components})")
+        log(f"[MONSTER GROUP] No-AI estimate: {total} (all blobs={components}, kept={significant})")
         return total
     except Exception as e:
         log(f"[MONSTER GROUP] No-AI count error: {e}")
