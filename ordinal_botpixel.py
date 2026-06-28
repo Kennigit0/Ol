@@ -31,6 +31,9 @@ last_battle_msg  = None
 ultimate_count = 0
 
 monster_paused    = False
+monster_group_msg = None   # the original photo message (for re-clicking)
+monster_candidates = []    # remaining untried guesses, best-first
+monster_tried     = set()  # numbers already tried for current puzzle
 wizard_active     = False
 wizard_key        = {}
 wizard_last_done  = None
@@ -137,7 +140,11 @@ def count_monsters_no_ai(image_bytes, max_count=12):
     4. Count distinct peaks above a similarity threshold (with non-max
        suppression so the same card isn't counted twice)
 
-    max_count caps the result to whatever buttons actually exist in that
+    Returns a ranked LIST of candidate counts (best guess first), computed
+    by trying several thresholds — gives us backup guesses to retry with
+    if the game says the first answer was wrong.
+
+    max_count caps results to whatever buttons actually exist in that
     message — don't hardcode a low number since some messages show up to
     12 options.
     """
@@ -149,16 +156,12 @@ def count_monsters_no_ai(image_bytes, max_count=12):
         arr = np.array(img, dtype=np.float32)
         h, w = arr.shape
 
-        # Estimated card size as a fraction of image (calibrated from real
-        # game screenshots — cards are roughly square thumbnails)
         card_w = max(8, int(w * 0.19))
         card_h = max(8, int(h * 0.24))
 
         if h <= card_h or w <= card_w:
             return None
 
-        # Find the busiest patch (highest variance) — likely inside a card,
-        # not the smoother sky/ocean/background
         best_var, best_pos = -1, (0, 0)
         step = 4
         for y in range(0, h - card_h, step):
@@ -176,7 +179,6 @@ def count_monsters_no_ai(image_bytes, max_count=12):
         if t_energy < 1e-6:
             return None
 
-        # Vectorized sliding-window normalized cross-correlation
         from numpy.lib.stride_tricks import sliding_window_view
         windows  = sliding_window_view(arr, (card_h, card_w))
         win_mean = windows.mean(axis=(2, 3), keepdims=True)
@@ -186,25 +188,35 @@ def count_monsters_no_ai(image_bytes, max_count=12):
         denom = win_energy * t_energy
         scores = np.divide(numer, denom, out=np.zeros_like(numer), where=denom > 1e-6)
 
-        THRESH = 0.5
-        ys, xs = np.where(scores > THRESH)
-        if len(xs) == 0:
+        def count_at_threshold(thresh):
+            ys, xs = np.where(scores > thresh)
+            if len(xs) == 0:
+                return None
+            cands = sorted(zip(scores[ys, xs], xs, ys), reverse=True)
+            peaks = []
+            for score, x, y in cands:
+                too_close = False
+                for px, py in peaks:
+                    if abs(x - px) < card_w * 0.7 and abs(y - py) < card_h * 0.7:
+                        too_close = True
+                        break
+                if not too_close:
+                    peaks.append((x, y))
+            return min(max_count, max(1, len(peaks)))
+
+        # Try several thresholds — 0.5 is our calibrated best guess,
+        # the others give backup guesses if that one turns out wrong
+        ranked = []
+        for thresh in [0.5, 0.45, 0.55, 0.4, 0.6, 0.35]:
+            c = count_at_threshold(thresh)
+            if c is not None and c not in ranked:
+                ranked.append(c)
+
+        if not ranked:
             return None
-        candidates = sorted(zip(scores[ys, xs], xs, ys), reverse=True)
 
-        peaks = []
-        for score, x, y in candidates:
-            too_close = False
-            for px, py in peaks:
-                if abs(x - px) < card_w * 0.7 and abs(y - py) < card_h * 0.7:
-                    too_close = True
-                    break
-            if not too_close:
-                peaks.append((x, y))
-
-        total = min(max_count, max(1, len(peaks)))
-        log(f"[MONSTER GROUP] Template-match estimate: {total} (peaks={peaks})")
-        return total
+        log(f"[MONSTER GROUP] Candidate counts (best first): {ranked}")
+        return ranked
     except Exception as e:
         log(f"[MONSTER GROUP] No-AI count error: {e}")
         return None
@@ -585,7 +597,7 @@ async def handle_wizard(msg):
 async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
-    global monster_paused
+    global monster_paused, monster_group_msg, monster_candidates, monster_tried
     last_action_time = time.time()
 
     btns = get_btns(m)
@@ -634,6 +646,46 @@ async def process(m):
         reset_last_action()
         return
 
+    # ── Monster group — wrong answer feedback → retry with next guess ──
+    # Only react to the "tries left" message — the separate "fatal wound"
+    # warning that arrives alongside it is just informational and would
+    # otherwise cause a double-click if we reacted to both.
+    if "tries left" in text or ("not right" in text and "monster" in text):
+        if monster_group_msg is not None and monster_candidates:
+            next_guess = None
+            while monster_candidates:
+                c = monster_candidates.pop(0)
+                if c not in monster_tried:
+                    next_guess = c
+                    break
+            if next_guess is not None:
+                btns2 = get_btns(monster_group_msg)
+                for i, b in enumerate(btns2):
+                    if str(next_guess) == b.strip():
+                        log(f"[MONSTER GROUP] Wrong — retrying with {next_guess}")
+                        monster_tried.add(next_guess)
+                        await safe_click(monster_group_msg, i)
+                        reset_last_action()
+                        return
+                log(f"[MONSTER GROUP] No button for retry guess {next_guess}")
+            else:
+                log("[MONSTER GROUP] Out of candidate guesses")
+        # No more candidates or no stored message — pause before softban risk
+        if not monster_paused:
+            monster_paused = True
+            log("⚠️ Out of guesses — Bot paused to avoid softban!")
+            await client.send_message("me", "⚠️ Monster group: ran out of guesses! Answer manually then send /resume to continue.")
+        reset_last_action()
+        return
+
+    # ── Monster group correctly solved (caption gets edited to success) ─
+    if "splashed foes" in text or ("earned" in text and "pearl" in text):
+        monster_group_msg  = None
+        monster_candidates = []
+        monster_tried       = set()
+        reset_last_action()
+        return
+
     # ── Monster group — count cards, no AI needed ─────────────
     if "group of monster" in text or "spot the number" in text or "group of monsters" in text:
         log("⚠️ MONSTER GROUP — Counting cards...")
@@ -645,27 +697,29 @@ async def process(m):
             except Exception as e:
                 log(f"[MONSTER GROUP] Download error: {e}")
 
-        count = None
+        candidates = None
         if image_bytes:
-            # Cap to the highest numbered button actually shown — usually
-            # equals len(btns), but compute from the button labels directly
-            # in case of gaps, since some messages show up to 12 options.
             numeric_btns = [int(b) for b in btns if b.strip().isdigit()]
             max_count = max(numeric_btns) if numeric_btns else 12
 
-            count = count_monsters_no_ai(image_bytes, max_count=max_count)
-            if count is None:
+            candidates = count_monsters_no_ai(image_bytes, max_count=max_count)
+            if candidates is None:
                 log("[MONSTER GROUP] No-AI method failed, trying AI...")
-                count = await count_monsters_with_ai(image_bytes)
+                ai_count = await count_monsters_with_ai(image_bytes)
+                candidates = [ai_count] if ai_count is not None else None
 
-        if count is not None:
+        if candidates:
+            monster_group_msg  = m
+            monster_candidates = candidates[1:]   # remaining ones saved for retry
+            monster_tried       = {candidates[0]}
+            best = candidates[0]
             for i, b in enumerate(btns):
-                if str(count) == b.strip():
-                    log(f"[MONSTER GROUP] Clicking '{b}'")
+                if str(best) == b.strip():
+                    log(f"[MONSTER GROUP] Clicking '{b}' (backups: {monster_candidates})")
                     await safe_click(m, i)
                     reset_last_action()
                     return
-            log(f"[MONSTER GROUP] No button matches count={count}, btns={btns}")
+            log(f"[MONSTER GROUP] No button matches count={best}, btns={btns}")
 
         # Fallback — pause for manual solving if both methods failed
         if not monster_paused:
