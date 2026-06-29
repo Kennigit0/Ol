@@ -1,4 +1,4 @@
-import asyncio, time, re, random, requests, base64, io
+import asyncio, time, re, random, requests, base64, io, os, subprocess
 import numpy as np
 from PIL import Image
 from telethon import TelegramClient, events
@@ -903,6 +903,55 @@ async def watchdog():
                 await explore()
 
 # ══════════════════════════════════════════════════════════════
+#  NOTIFICATION BUTTONS (Pause / Resume / Stop on screen)
+# ══════════════════════════════════════════════════════════════
+
+CONTROL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "control.txt")
+
+def show_notification():
+    """Shows a persistent notification with Pause/Resume/Stop buttons"""
+    try:
+        subprocess.run([
+            "termux-notification",
+            "--id", "100",
+            "--title", "Ordinal Legacy Bot",
+            "--content", "Tap a button to control the bot",
+            "--button1", "Pause",
+            "--button1-action", f"echo pause > {CONTROL_FILE}",
+            "--button2", "Resume",
+            "--button2-action", f"echo resume > {CONTROL_FILE}",
+            "--button3", "Stop",
+            "--button3-action", f"echo stop > {CONTROL_FILE}",
+            "--ongoing"
+        ], check=False)
+    except Exception as e:
+        log(f"[NOTIFICATION] Error showing notification: {e}")
+
+async def control_watcher():
+    """Polls the control file written by notification button taps"""
+    global monster_paused, bot_running
+    while True:
+        await asyncio.sleep(2)
+        if os.path.exists(CONTROL_FILE):
+            try:
+                with open(CONTROL_FILE) as f:
+                    cmd = f.read().strip()
+                os.remove(CONTROL_FILE)
+            except Exception:
+                cmd = ""
+
+            if cmd == "pause":
+                monster_paused = True
+                log("⏸ Paused via notification button")
+            elif cmd == "resume":
+                monster_paused = False
+                bot_running = True
+                log("✅ Resumed via notification button")
+            elif cmd == "stop":
+                bot_running = False
+                log("🛑 Stopped via notification button")
+
+# ══════════════════════════════════════════════════════════════
 #  START
 # ══════════════════════════════════════════════════════════════
 
@@ -911,8 +960,10 @@ async def main():
     await client.start(phone=PHONE)
     log("Connected! Bot started!")
     last_action_time = time.time()
+    show_notification()
     await client.send_message(BOT, "/explore")
     asyncio.create_task(watchdog())
+    asyncio.create_task(control_watcher())
     await client.run_until_disconnected()
 
 with client:
