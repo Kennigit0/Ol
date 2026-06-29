@@ -31,6 +31,7 @@ last_battle_msg  = None
 ultimate_count = 0
 
 monster_paused    = False
+bot_running       = True   # /stop sets this False, bot ignores everything
 monster_group_msg = None   # the original photo message (for re-clicking)
 monster_candidates = []    # remaining untried guesses, best-first
 monster_tried     = set()  # numbers already tried for current puzzle
@@ -598,6 +599,10 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
+
+    if not bot_running:
+        return  # /stop was sent — ignore everything until /resume
+
     last_action_time = time.time()
 
     btns = get_btns(m)
@@ -845,12 +850,24 @@ async def process(m):
 
 @client.on(events.NewMessage(outgoing=True))
 async def on_self(event):
-    global monster_paused
+    global monster_paused, bot_running
     text = (event.message.text or "").strip().lower()
-    if text == "/resume":
+
+    if text == "/pause":
+        monster_paused = True
+        log("⏸ Bot paused!")
+        await client.send_message("me", "⏸ Bot paused! Send /resume to continue.")
+
+    elif text == "/resume":
         monster_paused = False
+        bot_running = True
         log("✅ Bot resumed!")
         await client.send_message("me", "✅ Bot resumed!")
+
+    elif text == "/stop":
+        bot_running = False
+        log("🛑 Bot stopped!")
+        await client.send_message("me", "🛑 Bot stopped! Send /resume to start again.")
 
 # ══════════════════════════════════════════════════════════════
 #  LISTENERS
@@ -872,7 +889,7 @@ async def watchdog():
     global last_action_time, last_battle_msg
     while True:
         await asyncio.sleep(5)
-        if wizard_active or monster_paused:
+        if not bot_running or wizard_active or monster_paused:
             last_action_time = time.time()
             continue
         if time.time() - last_action_time > 5:
