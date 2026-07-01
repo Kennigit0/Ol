@@ -1,5 +1,6 @@
 import asyncio, time, re, random, requests, base64, io, os, subprocess
 import numpy as np
+import cv2
 from PIL import Image
 from telethon import TelegramClient, events
 from telethon.tl.types import ReplyInlineMarkup
@@ -132,86 +133,76 @@ async def explore():
 
 def count_monsters_no_ai(image_bytes, max_count=12):
     """
-    Count monster cards without AI — template matching.
-    All cards share identical artwork, so flat-background masking doesn't
-    work on busy photo backgrounds (sky/ocean/forest). Instead:
-    1. Find the patch with highest local variance (busy texture = inside a card)
-    2. Use it as a template, slide it across the whole image
-    3. Compute normalized cross-correlation at every position
-    4. Count distinct peaks above a similarity threshold (with non-max
-       suppression so the same card isn't counted twice)
+    Count monster cards using cv2 matchTemplate + dilation NMS.
 
-    Returns a ranked LIST of candidate counts (best guess first), computed
-    by trying several thresholds — gives us backup guesses to retry with
-    if the game says the first answer was wrong.
+    The pixel-jitter problem (2 monsters detected as 11) was caused by
+    manual NMS — every adjacent pixel above the threshold was counted
+    as a separate peak. Fix: use cv2.dilate() on the score map so only
+    true local maxima survive, then threshold those peaks.
 
-    max_count caps results to whatever buttons actually exist in that
-    message — don't hardcode a low number since some messages show up to
-    12 options.
+    Returns a ranked list of candidate counts (best first) by trying
+    several score thresholds — gives backup guesses if first is wrong.
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("L")  # grayscale
-        scale = 200 / max(img.size)
-        if scale < 1:
-            img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))))
-        arr = np.array(img, dtype=np.float32)
-        h, w = arr.shape
-
-        card_w = max(8, int(w * 0.19))
-        card_h = max(8, int(h * 0.24))
-
-        if h <= card_h or w <= card_w:
+        img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
+        bgr = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+        if bgr is None:
             return None
 
-        best_var, best_pos = -1, (0, 0)
-        step = 4
+        h, w = bgr.shape[:2]
+        scale = 300 / max(h, w)
+        bgr = cv2.resize(bgr, (int(w*scale), int(h*scale)))
+        h, w = bgr.shape[:2]
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+        card_h = max(15, int(min(h, w) * 0.22))
+        card_w = card_h
+
+        # Skip background-colored patches when picking the template
+        corners = [float(gray[0,0]), float(gray[0,w-1]),
+                   float(gray[h-1,0]), float(gray[h-1,w-1])]
+        bg_mean = np.mean(corners)
+        bg_std  = float(np.std(gray)) * 0.5
+        step    = max(2, card_h // 4)
+        best_score, best_pos = -1, None
         for y in range(0, h - card_h, step):
             for x in range(0, w - card_w, step):
-                patch = arr[y:y+card_h, x:x+card_w]
-                v = patch.var()
-                if v > best_var:
-                    best_var = v
+                patch = gray[y:y+card_h, x:x+card_w]
+                if abs(float(patch.mean()) - bg_mean) < bg_std:
+                    continue
+                v = float(patch.var())
+                if v > best_score:
+                    best_score = v
                     best_pos = (x, y)
 
-        tx, ty = best_pos
-        template = arr[ty:ty+card_h, tx:tx+card_w]
-        t_norm   = template - template.mean()
-        t_energy = np.sqrt((t_norm**2).sum())
-        if t_energy < 1e-6:
+        if best_pos is None:
             return None
 
-        from numpy.lib.stride_tricks import sliding_window_view
-        windows  = sliding_window_view(arr, (card_h, card_w))
-        win_mean = windows.mean(axis=(2, 3), keepdims=True)
-        win_norm = windows - win_mean
-        win_energy = np.sqrt((win_norm**2).sum(axis=(2, 3)))
-        numer = (win_norm * t_norm).sum(axis=(2, 3))
-        denom = win_energy * t_energy
-        scores = np.divide(numer, denom, out=np.zeros_like(numer), where=denom > 1e-6)
+        tx, ty = best_pos
+        template = gray[ty:ty+card_h, tx:tx+card_w]
+        result   = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
 
-        def count_at_threshold(thresh):
-            ys, xs = np.where(scores > thresh)
-            if len(xs) == 0:
-                return None
-            cands = sorted(zip(scores[ys, xs], xs, ys), reverse=True)
-            peaks = []
-            for score, x, y in cands:
-                too_close = False
-                for px, py in peaks:
-                    if abs(x - px) < card_w * 0.7 and abs(y - py) < card_h * 0.7:
-                        too_close = True
-                        break
-                if not too_close:
-                    peaks.append((x, y))
-            return min(max_count, max(1, len(peaks)))
+        # Dilation NMS: a pixel is a true local maximum only if it equals
+        # the max in its card-sized neighbourhood. This eliminates all the
+        # adjacent-pixel false detections without any manual loop.
+        kernel       = np.ones((card_h, card_w), np.float32)
+        dilated_result = cv2.dilate(result, kernel)
+        local_max    = (result == dilated_result) & (result > 0.0)
+        ys, xs       = np.where(local_max)
 
-        # Try several thresholds — 0.5 is our calibrated best guess,
-        # the others give backup guesses if that one turns out wrong
+        if len(xs) == 0:
+            return None
+
+        peak_scores = sorted(result[ys, xs].tolist(), reverse=True)
+        log(f"[MONSTER GROUP] Peak scores: {[f'{s:.3f}' for s in peak_scores[:15]]}")
+
+        # Try several thresholds to generate ranked candidate list
         ranked = []
-        for thresh in [0.5, 0.45, 0.55, 0.4, 0.6, 0.35]:
-            c = count_at_threshold(thresh)
-            if c is not None and c not in ranked:
-                ranked.append(c)
+        for ratio in [0.55, 0.50, 0.60, 0.45, 0.65, 0.40]:
+            n = sum(1 for s in peak_scores if s >= ratio)
+            n = min(max_count, max(1, n))
+            if n not in ranked:
+                ranked.append(n)
 
         if not ranked:
             return None
