@@ -133,15 +133,16 @@ async def explore():
 
 def count_monsters_no_ai(image_bytes, max_count=12):
     """
-    Count monster cards using cv2 matchTemplate + dilation NMS.
+    Count monster cards using fixed monster templates + cv2 matchTemplate.
 
-    The pixel-jitter problem (2 monsters detected as 11) was caused by
-    manual NMS — every adjacent pixel above the threshold was counted
-    as a separate peak. Fix: use cv2.dilate() on the score map so only
-    true local maxima survive, then threshold those peaks.
+    Instead of guessing which patch in the scene is a card (which fails
+    when the background is busier than the cards), we use known monster
+    artwork files saved alongside this script. For each saved template,
+    try multiple scales, find the biggest score GAP in the ranked peaks
+    (real cards score high, background scores low → gap marks the cutoff),
+    and vote across scales. The most common gap-count wins.
 
-    Returns a ranked list of candidate counts (best first) by trying
-    several score thresholds — gives backup guesses if first is wrong.
+    Returns a ranked list [best_guess, backup1, backup2, ...].
     """
     try:
         img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -152,63 +153,74 @@ def count_monsters_no_ai(image_bytes, max_count=12):
         h, w = bgr.shape[:2]
         scale = 300 / max(h, w)
         bgr = cv2.resize(bgr, (int(w*scale), int(h*scale)))
-        h, w = bgr.shape[:2]
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        sh, sw = bgr.shape[:2]
+        scene_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
-        card_h = max(15, int(min(h, w) * 0.22))
-        card_w = card_h
+        # Load all monster template files from the same directory as this script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        template_files = sorted([
+            os.path.join(script_dir, f) for f in os.listdir(script_dir)
+            if f.startswith("monster_template") and f.endswith(".jpg")
+        ])
 
-        # Skip background-colored patches when picking the template
-        corners = [float(gray[0,0]), float(gray[0,w-1]),
-                   float(gray[h-1,0]), float(gray[h-1,w-1])]
-        bg_mean = np.mean(corners)
-        bg_std  = float(np.std(gray)) * 0.5
-        step    = max(2, card_h // 4)
-        best_score, best_pos = -1, None
-        for y in range(0, h - card_h, step):
-            for x in range(0, w - card_w, step):
-                patch = gray[y:y+card_h, x:x+card_w]
-                if abs(float(patch.mean()) - bg_mean) < bg_std:
+        if not template_files:
+            log("[MONSTER GROUP] No template files found — falling back to auto-detect")
+            return None
+
+        all_votes = []
+        for tpl_path in template_files:
+            tpl = cv2.imread(tpl_path, cv2.IMREAD_GRAYSCALE)
+            if tpl is None:
+                continue
+
+            for scale_frac in [0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.25]:
+                tw = max(8, int(sw * scale_frac))
+                th = max(8, int(sh * scale_frac))
+                if tw >= sw or th >= sh:
                     continue
-                v = float(patch.var())
-                if v > best_score:
-                    best_score = v
-                    best_pos = (x, y)
+                t_resized = cv2.resize(tpl, (tw, th))
+                result = cv2.matchTemplate(scene_gray, t_resized, cv2.TM_CCOEFF_NORMED)
 
-        if best_pos is None:
+                # Dilation NMS — collapses pixel-jitter blobs to single peaks
+                kernel = np.ones((th, tw), np.float32)
+                dilated = cv2.dilate(result, kernel)
+                local_max = (result == dilated) & (result > 0.0)
+                ys, xs = np.where(local_max)
+                if len(xs) == 0:
+                    continue
+
+                peaks = sorted(result[ys, xs].tolist(), reverse=True)[:max_count+2]
+                if len(peaks) < 2:
+                    continue
+
+                # Biggest gap in sorted scores = boundary between cards and background
+                gaps = [(peaks[i] - peaks[i+1], i+1) for i in range(len(peaks)-1)]
+                max_gap, gap_idx = max(gaps)
+                # Only vote when gap is meaningful
+                if max_gap >= 0.04:
+                    all_votes.append(gap_idx)
+
+        if not all_votes:
             return None
 
-        tx, ty = best_pos
-        template = gray[ty:ty+card_h, tx:tx+card_w]
-        result   = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+        log(f"[MONSTER GROUP] Votes: {all_votes}")
 
-        # Dilation NMS: a pixel is a true local maximum only if it equals
-        # the max in its card-sized neighbourhood. This eliminates all the
-        # adjacent-pixel false detections without any manual loop.
-        kernel       = np.ones((card_h, card_w), np.float32)
-        dilated_result = cv2.dilate(result, kernel)
-        local_max    = (result == dilated_result) & (result > 0.0)
-        ys, xs       = np.where(local_max)
+        # Build ranked list: most-voted first, then unique other values
+        from collections import Counter
+        counter = Counter(all_votes)
+        ranked = [count for count, _ in counter.most_common()]
+        ranked = [min(max_count, max(1, c)) for c in ranked]
+        # Deduplicate while preserving order
+        seen = set()
+        ranked_dedup = []
+        for c in ranked:
+            if c not in seen:
+                seen.add(c)
+                ranked_dedup.append(c)
 
-        if len(xs) == 0:
-            return None
+        log(f"[MONSTER GROUP] Candidate counts (best first): {ranked_dedup}")
+        return ranked_dedup
 
-        peak_scores = sorted(result[ys, xs].tolist(), reverse=True)
-        log(f"[MONSTER GROUP] Peak scores: {[f'{s:.3f}' for s in peak_scores[:15]]}")
-
-        # Try several thresholds to generate ranked candidate list
-        ranked = []
-        for ratio in [0.55, 0.50, 0.60, 0.45, 0.65, 0.40]:
-            n = sum(1 for s in peak_scores if s >= ratio)
-            n = min(max_count, max(1, n))
-            if n not in ranked:
-                ranked.append(n)
-
-        if not ranked:
-            return None
-
-        log(f"[MONSTER GROUP] Candidate counts (best first): {ranked}")
-        return ranked
     except Exception as e:
         log(f"[MONSTER GROUP] No-AI count error: {e}")
         return None
