@@ -41,6 +41,9 @@ wizard_key        = {}
 wizard_last_done  = None
 wizard_last_click = 0
 
+monster_current_hash  = None  # ahash of the image currently being solved
+monster_last_guess    = None  # count value most recently clicked, for registration on success
+
 # ─────────────────────────────────────────────────────────────
 
 def get_btns(m):
@@ -131,7 +134,74 @@ async def explore():
     last_action_time = time.time()
     await client.send_message(BOT, "/explore")
 
-def count_monsters_no_ai(image_bytes, max_count=12):
+HASH_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monster_hash_library.json")
+HASH_MATCH_MAX_DIST = 15   # out of 256 bits — same render ≈ 0-5, different count/monster ≈ 100+
+
+def ahash_bytes(image_bytes, size=16):
+    """16x16 average-hash — cheap fingerprint of a screenshot's exact visual layout."""
+    img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    gray = cv2.imdecode(img_arr, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return None
+    small = cv2.resize(gray, (size, size))
+    avg = small.mean()
+    bits = (small > avg).flatten()
+    # pack bits into a hex string for compact JSON storage
+    return "".join("1" if b else "0" for b in bits)
+
+def hamming(hash_a, hash_b):
+    return sum(a != b for a, b in zip(hash_a, hash_b))
+
+def load_hash_library():
+    if not os.path.exists(HASH_LIB_PATH):
+        return []
+    try:
+        import json
+        with open(HASH_LIB_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        log(f"[HASH LIB] Load error: {e}")
+        return []
+
+def save_hash_library(entries):
+    try:
+        import json
+        with open(HASH_LIB_PATH, "w") as f:
+            json.dump(entries, f)
+    except Exception as e:
+        log(f"[HASH LIB] Save error: {e}")
+
+def lookup_hash_library(image_bytes):
+    """Return (count, matched_hash) if a known screenshot matches closely enough, else (None, hash)."""
+    h = ahash_bytes(image_bytes)
+    if h is None:
+        return None, None
+    entries = load_hash_library()
+    best = None
+    best_dist = HASH_MATCH_MAX_DIST + 1
+    for e in entries:
+        d = hamming(h, e["hash"])
+        if d < best_dist:
+            best_dist = d
+            best = e["count"]
+    if best is not None:
+        log(f"[HASH LIB] Match found — count={best} (dist={best_dist}/256)")
+    return best, h
+
+def register_hash_library(image_hash, count):
+    """Save a confirmed-correct (hash, count) pair so future identical screenshots skip counting entirely."""
+    if image_hash is None or count is None:
+        return
+    entries = load_hash_library()
+    # avoid saving near-duplicates of something already stored with the same count
+    for e in entries:
+        if e["count"] == count and hamming(image_hash, e["hash"]) < 5:
+            return
+    entries.append({"hash": image_hash, "count": count})
+    save_hash_library(entries)
+    log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
+
+
     """
     Count monster cards using fixed monster templates + cv2 matchTemplate.
 
@@ -602,6 +672,7 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
+    global monster_current_hash, monster_last_guess
     global bot_running
 
     if not bot_running:
@@ -670,6 +741,7 @@ async def process(m):
                     if str(next_guess) == b.strip():
                         log(f"[MONSTER GROUP] Wrong — retrying with {next_guess} (attempt {len(monster_tried)+1}/2)")
                         monster_tried.add(next_guess)
+                        monster_last_guess = next_guess
                         await safe_click(monster_group_msg, i)
                         reset_last_action()
                         return
@@ -680,6 +752,8 @@ async def process(m):
         monster_group_msg  = None
         monster_candidates = []
         monster_tried      = set()
+        monster_current_hash = None
+        monster_last_guess   = None
         log("🛑 2 tries failed — Bot stopped!")
         await client.send_message("me", "🛑 Monster group: 2 tries failed!\nAnswer manually then send /resume to restart bot.")
         reset_last_action()
@@ -687,9 +761,13 @@ async def process(m):
 
     # ── Monster group correctly solved (caption gets edited to success) ─
     if "splashed foes" in text or ("earned" in text and "pearl" in text):
+        if monster_current_hash is not None and monster_last_guess is not None:
+            register_hash_library(monster_current_hash, monster_last_guess)
         monster_group_msg  = None
         monster_candidates = []
         monster_tried       = set()
+        monster_current_hash = None
+        monster_last_guess   = None
         reset_last_action()
         return
 
@@ -705,20 +783,28 @@ async def process(m):
                 log(f"[MONSTER GROUP] Download error: {e}")
 
         candidates = None
+        current_hash = None
         if image_bytes:
             numeric_btns = [int(b) for b in btns if b.strip().isdigit()]
             max_count = max(numeric_btns) if numeric_btns else 12
 
-            candidates = count_monsters_no_ai(image_bytes, max_count=max_count)
-            if candidates is None:
-                log("[MONSTER GROUP] No-AI method failed, trying AI...")
-                ai_count = await count_monsters_with_ai(image_bytes)
-                candidates = [ai_count] if ai_count is not None else None
+            lib_count, current_hash = lookup_hash_library(image_bytes)
+            if lib_count is not None:
+                log(f"[MONSTER GROUP] Hash library hit — count={lib_count} (no counting needed)")
+                candidates = [lib_count]
+            else:
+                candidates = count_monsters_no_ai(image_bytes, max_count=max_count)
+                if candidates is None:
+                    log("[MONSTER GROUP] No-AI method failed, trying AI...")
+                    ai_count = await count_monsters_with_ai(image_bytes)
+                    candidates = [ai_count] if ai_count is not None else None
 
         if candidates:
             monster_group_msg  = m
             monster_candidates = candidates[1:]   # remaining ones saved for retry
             monster_tried       = {candidates[0]}
+            monster_current_hash = current_hash
+            monster_last_guess   = candidates[0]
             best = candidates[0]
             for i, b in enumerate(btns):
                 if str(best) == b.strip():
