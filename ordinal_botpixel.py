@@ -655,9 +655,6 @@ async def process(m):
         return
 
     # ── Monster group — wrong answer feedback → retry with next guess ──
-    # Only react to the "tries left" message — the separate "fatal wound"
-    # warning that arrives alongside it is just informational and would
-    # otherwise cause a double-click if we reacted to both.
     if "tries left" in text or ("not right" in text and "monster" in text):
         if monster_group_msg is not None and monster_candidates:
             next_guess = None
@@ -666,23 +663,24 @@ async def process(m):
                 if c not in monster_tried:
                     next_guess = c
                     break
-            if next_guess is not None:
+            if next_guess is not None and len(monster_tried) < 2:
                 btns2 = get_btns(monster_group_msg)
                 for i, b in enumerate(btns2):
                     if str(next_guess) == b.strip():
-                        log(f"[MONSTER GROUP] Wrong — retrying with {next_guess}")
+                        log(f"[MONSTER GROUP] Wrong — retrying with {next_guess} (attempt {len(monster_tried)+1}/2)")
                         monster_tried.add(next_guess)
                         await safe_click(monster_group_msg, i)
                         reset_last_action()
                         return
                 log(f"[MONSTER GROUP] No button for retry guess {next_guess}")
-            else:
-                log("[MONSTER GROUP] Out of candidate guesses")
-        # No more candidates or no stored message — pause before softban risk
-        if not monster_paused:
-            monster_paused = True
-            log("⚠️ Out of guesses — Bot paused to avoid softban!")
-            await client.send_message("me", "⚠️ Monster group: ran out of guesses! Answer manually then send /resume to continue.")
+
+        # 2 tries used up OR no more candidates → stop bot
+        bot_running = False
+        monster_group_msg  = None
+        monster_candidates = []
+        monster_tried      = set()
+        log("🛑 2 tries failed — Bot stopped!")
+        await client.send_message("me", "🛑 Monster group: 2 tries failed!\nAnswer manually then send /resume to restart bot.")
         reset_last_action()
         return
 
