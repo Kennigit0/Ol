@@ -602,6 +602,7 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
+    global bot_running
 
     if not bot_running:
         return  # /stop was sent — ignore everything until /resume
