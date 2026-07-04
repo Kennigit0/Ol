@@ -43,6 +43,7 @@ wizard_last_click = 0
 
 monster_current_hash  = None  # ahash of the image currently being solved
 monster_last_guess    = None  # count value most recently clicked, for registration on success
+monster_pending_image = None  # raw bytes of the most recent monster-group screenshot, for /count
 
 # ─────────────────────────────────────────────────────────────
 
@@ -672,7 +673,7 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
-    global monster_current_hash, monster_last_guess
+    global monster_current_hash, monster_last_guess, monster_pending_image
     global bot_running
 
     if not bot_running:
@@ -782,6 +783,8 @@ async def process(m):
             except Exception as e:
                 log(f"[MONSTER GROUP] Download error: {e}")
 
+        monster_pending_image = image_bytes  # available for a manual /count reply regardless of outcome below
+
         candidates = None
         current_hash = None
         if image_bytes:
@@ -818,7 +821,11 @@ async def process(m):
         if not monster_paused:
             monster_paused = True
             log("⚠️ Counting failed — Bot paused!")
-            await client.send_message("me", "⚠️ Monster group counting failed! Answer manually then send /resume to continue.")
+            caption = "⚠️ Monster group counting failed! Answer manually, then send /count <n> so I remember it, then /resume."
+            if image_bytes:
+                await client.send_file("me", image_bytes, caption=caption)
+            else:
+                await client.send_message("me", caption)
         reset_last_action()
         return
 
@@ -938,7 +945,7 @@ async def process(m):
 
 @client.on(events.NewMessage(outgoing=True))
 async def on_self(event):
-    global monster_paused, bot_running
+    global monster_paused, bot_running, monster_pending_image
     text = (event.message.text or "").strip().lower()
 
     if text == "/pause":
@@ -956,6 +963,21 @@ async def on_self(event):
         bot_running = False
         log("🛑 Bot stopped!")
         await client.send_message("me", "🛑 Bot stopped! Send /resume to start again.")
+
+    elif text.startswith("/count"):
+        parts = text.split()
+        if len(parts) != 2 or not parts[1].isdigit():
+            await client.send_message("me", "Usage: /count <n>  e.g. /count 7")
+            return
+        count = int(parts[1])
+        if monster_pending_image is None:
+            await client.send_message("me", "No pending monster-group image to label — this only works right after a group appears.")
+            return
+        h = ahash_bytes(monster_pending_image)
+        register_hash_library(h, count)
+        monster_pending_image = None
+        log(f"[HASH LIB] Manually registered via /count — count={count}")
+        await client.send_message("me", f"✅ Saved — count={count}. I'll recognize this layout next time.")
 
 # ══════════════════════════════════════════════════════════════
 #  LISTENERS
