@@ -203,6 +203,7 @@ def register_hash_library(image_hash, count):
     log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
 
 
+def count_monsters_no_ai(image_bytes, max_count=12):
     """
     Count monster cards using fixed monster templates + cv2 matchTemplate.
 
