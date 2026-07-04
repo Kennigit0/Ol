@@ -770,11 +770,19 @@ async def process(m):
         monster_tried       = set()
         monster_current_hash = None
         monster_last_guess   = None
+        monster_paused      = False
         reset_last_action()
         return
 
     # ── Monster group — count cards, no AI needed ─────────────
     if "group of monster" in text or "spot the number" in text or "group of monsters" in text:
+        # Pre-alert messages ("a group of monsters are approaching...") have no
+        # buttons and no image yet — the real countable message follows right
+        # after. Don't treat this as a failed count / trigger a pause for it.
+        if not btns and not (m.photo or m.document):
+            log("[MONSTER GROUP] Pre-alert text only (no image/buttons yet) — ignoring")
+            return
+
         log("⚠️ MONSTER GROUP — Counting cards...")
 
         image_bytes = None
