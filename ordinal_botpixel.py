@@ -1,4 +1,4 @@
-import asyncio, time, re, random, requests, base64, io, os, subprocess
+import asyncio, time, re, random, requests, base64, io, os, subprocess, unicodedata
 import numpy as np
 import cv2
 from PIL import Image
@@ -392,18 +392,74 @@ def match_scrambled_move(text):
     move, _ = match_scrambled_move_scored(text)
     return move
 
+def normalize_symbol(s):
+    """
+    Strip invisible variation-selector / combining-mark characters (e.g. U+FE0F)
+    from an emoji string. The game's text-scrambling can reorder these relative
+    to the base character, which breaks exact-string matching even when the
+    symbol looks visually identical. Comparing on the bare base character(s)
+    sidesteps that entirely.
+    """
+    return "".join(c for c in s if unicodedata.category(c) not in ("Mn", "Cf"))
+
+def extract_line_symbol(line):
+    """
+    Pull out the meaningful 'choice symbol' from a sequence line, without
+    relying on bracket punctuation at all — brackets have been observed
+    missing, reversed, prefixed with stray characters, or collapsed empty
+    across different obfuscation variants, but the actual symbol character
+    itself is always present somewhere in the line.
+    """
+    non_ascii = [c for c in line if ord(c) > 127]
+    filtered = [c for c in non_ascii if unicodedata.category(c) not in ("Mn", "Cf")]
+    if filtered:
+        # de-duplicate while preserving order (repeats like "🔺🔺" collapse to one)
+        seen = []
+        for c in filtered:
+            if c not in seen:
+                seen.append(c)
+        return seen[0]
+
+    # No unicode symbol on this line — check for a short ASCII symbol
+    # (e.g. "+") sitting in brackets or standing alone near the start.
+    m = re.search(r'[\[\s]([+\-*^~])[\]\s]', line)
+    if m:
+        return m.group(1)
+    return None
+
+
+def looks_like_scrambled_word(token, target_word):
+    """Anagram-tolerant check — same letters, similar length, any order.
+    Needed because obfuscation sometimes scrambles the trigger word itself
+    (e.g. 'ignore' -> 'negrIo') rather than just the move names."""
+    t = re.sub(r'[^a-z]', '', token.lower())
+    if abs(len(t) - len(target_word)) > 1:
+        return False
+    return sorted(t) == sorted(target_word)
+
 def get_ignore_emojis(text):
     ignore = set()
     for line in text.split('\n'):
-        if 'ignore' in line.lower():
-            for token in re.findall(r'\S+', line):
-                cleaned = token.strip('[](){}><|!. ')
-                if not cleaned:
-                    continue
-                # Real emoji/unicode symbols, OR short non-alphanumeric
-                # ASCII symbols like "+" or "-" (but not stray words).
-                if (not cleaned.isascii()) or (len(cleaned) <= 2 and not cleaned.isalnum()):
-                    ignore.add(cleaned)
+        tokens = re.findall(r'\S+', line)
+        ignore_idx = None
+        for i, tok in enumerate(tokens):
+            if 'ignore' in tok.lower() or looks_like_scrambled_word(tok, "ignore"):
+                ignore_idx = i
+                break
+        if ignore_idx is None:
+            continue
+        # Only tokens AFTER the trigger word are candidates — anything
+        # earlier on the line (e.g. the target symbol mentioned in the
+        # same sentence) must not be swept into the ignore set.
+        for token in tokens[ignore_idx + 1:]:
+            cleaned = token.strip('[](){}><|!. ')
+            if not cleaned:
+                continue
+            cleaned = normalize_symbol(cleaned)
+            if not cleaned:
+                continue
+            if (not cleaned.isascii()) or (len(cleaned) <= 2 and not cleaned.isalnum()):
+                ignore.add(cleaned)
     return ignore
 
 def is_ignored(emoji, ignore_set):
@@ -414,7 +470,7 @@ def is_ignored(emoji, ignore_set):
 
 def get_target_emoji(text, emoji_map=None):
     def clean(s):
-        return s.strip('[](){}><|!. ')
+        return normalize_symbol(s.strip('[](){}><|!. '))
 
     for m in re.finditer(r'(\S+)\s+s\w*mbol', text, re.IGNORECASE):
         c = clean(m.group(1))
@@ -613,34 +669,20 @@ async def handle_wizard(msg):
             log("[WIZARD] No key yet — skip")
             return
 
-    # Build emoji→first_move map from sequence lines
+    # Build emoji→first_move map from sequence lines. We no longer try to
+    # parse bracket punctuation at all — it's been observed missing,
+    # reversed, prefixed with stray characters, and collapsed empty across
+    # different obfuscation variants. The symbol character itself is always
+    # present in the line regardless, so extract that directly.
     emoji_map = {}
     for line in raw.split('\n'):
-        # Normal bracket form: [SYMBOL] — search (not match) so a stray
-        # leading character before the bracket (e.g. "k[🎵🎵🎵]") doesn't
-        # hide the whole line from the parser.
-        m_line = re.search(r'\[(.{1,4}?)\]', line)
-        bracket_content = None
-        if m_line:
-            bracket_content = m_line.group(1).strip()
-        else:
-            # Reversed/local-scramble form: SYMBOL][  (symbol sits outside
-            # the brackets, brackets themselves swapped) — e.g. "🎵]["
-            m_rev = re.search(r'(\S{1,4})\]\[', line)
-            if m_rev:
-                bracket_content = m_rev.group(1).strip()
-
-        if bracket_content:
-            # Accept non-ascii emoji/unicode symbols AND short plain-ASCII
-            # symbols like "+" or "-" — only reject if it looks like it's
-            # actually a stray letter/word fragment (long or alphabetic).
-            is_valid_symbol = (not bracket_content.isascii()) or (
-                len(bracket_content) <= 2 and not bracket_content.isalnum()
-            )
-            if is_valid_symbol:
-                moves_found = re.findall(r"'([^']+)'", line)
-                if moves_found:
-                    emoji_map[bracket_content] = moves_found[0]
+        if "'" not in line:
+            continue
+        symbol = extract_line_symbol(line)
+        if symbol:
+            moves_found = re.findall(r"'([^']+)'", line)
+            if moves_found:
+                emoji_map[symbol] = moves_found[0]
 
     # Find target emoji
     emoji = get_target_emoji(raw, emoji_map)
