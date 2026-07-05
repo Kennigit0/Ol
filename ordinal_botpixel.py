@@ -398,7 +398,11 @@ def get_ignore_emojis(text):
         if 'ignore' in line.lower():
             for token in re.findall(r'\S+', line):
                 cleaned = token.strip('[](){}><|!. ')
-                if cleaned and not cleaned.isascii():
+                if not cleaned:
+                    continue
+                # Real emoji/unicode symbols, OR short non-alphanumeric
+                # ASCII symbols like "+" or "-" (but not stray words).
+                if (not cleaned.isascii()) or (len(cleaned) <= 2 and not cleaned.isalnum()):
                     ignore.add(cleaned)
     return ignore
 
@@ -612,10 +616,28 @@ async def handle_wizard(msg):
     # Build emoji→first_move map from sequence lines
     emoji_map = {}
     for line in raw.split('\n'):
-        m_line = re.match(r'\[(.+?)\]', line)
+        # Normal bracket form: [SYMBOL] — search (not match) so a stray
+        # leading character before the bracket (e.g. "k[🎵🎵🎵]") doesn't
+        # hide the whole line from the parser.
+        m_line = re.search(r'\[(.{1,4}?)\]', line)
+        bracket_content = None
         if m_line:
             bracket_content = m_line.group(1).strip()
-            if bracket_content and not bracket_content.isascii():
+        else:
+            # Reversed/local-scramble form: SYMBOL][  (symbol sits outside
+            # the brackets, brackets themselves swapped) — e.g. "🎵]["
+            m_rev = re.search(r'(\S{1,4})\]\[', line)
+            if m_rev:
+                bracket_content = m_rev.group(1).strip()
+
+        if bracket_content:
+            # Accept non-ascii emoji/unicode symbols AND short plain-ASCII
+            # symbols like "+" or "-" — only reject if it looks like it's
+            # actually a stray letter/word fragment (long or alphabetic).
+            is_valid_symbol = (not bracket_content.isascii()) or (
+                len(bracket_content) <= 2 and not bracket_content.isalnum()
+            )
+            if is_valid_symbol:
                 moves_found = re.findall(r"'([^']+)'", line)
                 if moves_found:
                     emoji_map[bracket_content] = moves_found[0]
