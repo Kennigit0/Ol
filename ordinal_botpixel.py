@@ -97,6 +97,14 @@ def should_capture(m):
             return True
     return False
 
+def get_matched_capture_name(m):
+    """Which CAPTURE_LIST entry matched this message — for notification text."""
+    text = (m.text or "").lower()
+    for name in CAPTURE_LIST:
+        if re.search(r'\b' + re.escape(name) + r'\b', text):
+            return name
+    return None
+
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
@@ -752,6 +760,20 @@ async def process(m):
     raw  = m.text or ""
     log(f"MSG: btns={btns} text={text[:60]}")
 
+    # ── Found a Core ─────────────────────────────────────────
+    m_core = re.search(r'found a[n]?\s+([\w\s]+?core)\b', text, re.IGNORECASE)
+    if m_core:
+        core_name = m_core.group(1).strip().title()
+        log(f"[FOUND] Core: {core_name}")
+        await client.send_message("me", f"💠 Found a {core_name}!\n\n{raw}")
+
+    # ── Found an Artifact ────────────────────────────────────
+    m_artifact = re.search(r'found an artifact\s*-\s*(.+)', text, re.IGNORECASE)
+    if m_artifact:
+        artifact_name = m_artifact.group(1).strip().title()
+        log(f"[FOUND] Artifact: {artifact_name}")
+        await client.send_message("me", f"🗿 Found an artifact — {artifact_name}!")
+
     # ── /chat ────────────────────────────────────────────────
     if "you are now connected with user" in text or "start chatting with" in text:
         if not monster_paused:
@@ -962,8 +984,10 @@ async def process(m):
     if has_btn(bl, "capture"):
         if should_capture(m):
             idx = get_btn_idx(bl, "capture")
-            log(f"Capture! idx={idx}")
+            name = get_matched_capture_name(m)
+            log(f"Capture! idx={idx} name={name}")
             await safe_click(m, idx)
+            await client.send_message("me", f"🎯 Capturing {name.title()} — it's on your watch list!")
         else:
             log("Not in capture list - skipping...")
             await asyncio.sleep(1)
