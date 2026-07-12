@@ -894,8 +894,8 @@ async def watchdog():
         await asyncio.sleep(10)
         if not bot_running or wizard_active or monster_paused:
             last_action_time = time.time()
-            continue
-        if time.time() - last_action_time > 60:
+            continue 
+        if time.time() - last_action_time > 3:
             log("Stuck! Sending /explore...")
             await explore()
 
