@@ -33,6 +33,7 @@ ultimate_count = 0
 
 monster_paused    = False
 bot_running       = True   # /stop sets this False, bot ignores everything
+restricted_mode   = False  # /mode restricted -> skip battles, keep trades/capture/wizard/monster-group
 monster_group_msg = None   # the original photo message (for re-clicking)
 monster_candidates = []    # remaining untried guesses, best-first
 monster_tried     = set()  # numbers already tried for current puzzle
@@ -930,12 +931,18 @@ async def process(m):
 
     # ── Enemy to defeat ──────────────────────────────────────
     if needs_fight(m):
+        if restricted_mode:
+            log("[RESTRICTED] Skipping fight (restricted mode is on)")
+            return
         log("Enemy pending! Sending /fight...")
         await fight()
         return
 
     # ── Ongoing ──────────────────────────────────────────────
     if is_ongoing(m):
+        if restricted_mode:
+            log("[RESTRICTED] Skipping ongoing battle (restricted mode is on)")
+            return
         log("Ongoing! Retrying battle...")
         if last_battle_msg:
             await click_battle(last_battle_msg)
@@ -950,7 +957,7 @@ async def process(m):
         return
 
     # ── Ultimate (max 1x) ────────────────────────────────────
-    if has_ultimate(bl) and ultimate_count < 2:
+    if has_ultimate(bl) and ultimate_count < 2 and not restricted_mode:
         last_battle_msg = m
         idx = get_ultimate_idx(bl)
         ultimate_count += 1
@@ -959,21 +966,21 @@ async def process(m):
         return
 
     # ── Attack ───────────────────────────────────────────────
-    if has_btn(bl, "attack"):
+    if has_btn(bl, "attack") and not restricted_mode:
         last_battle_msg = m
         idx = get_btn_idx(bl, "attack")
         log(f"Attack! idx={idx}")
         await safe_click(m, idx)
         return
     # ── Attack ───────────────────────────────────────────────
-    if has_btn(bl, "📦"):
+    if has_btn(bl, "📦") and not restricted_mode:
         last_battle_msg = m
         idx = get_btn_idx(bl, "📦")
         log(f"📦! idx={idx}")
         await safe_click(m, idx)
         return
 
-    # ── Freeze Ray ───────────────────────────────────────────
+    # ── Freeze Ray (part of capture flow, always active) ──────
     if has_btn(bl, "freeze ray"):
         idx = get_btn_idx(bl, "freeze ray")
         log(f"Freeze Ray! idx={idx}")
@@ -1042,7 +1049,7 @@ async def process(m):
 
 @client.on(events.NewMessage(outgoing=True))
 async def on_self(event):
-    global monster_paused, bot_running, monster_pending_image
+    global monster_paused, bot_running, monster_pending_image, restricted_mode
     text = (event.message.text or "").strip().lower()
 
     if text == "/pause":
@@ -1060,6 +1067,19 @@ async def on_self(event):
         bot_running = False
         log("🛑 Bot stopped!")
         await client.send_message("me", "🛑 Bot stopped! Send /resume to start again.")
+
+    elif text == "/mode restricted" or text == "/mode tc":
+        restricted_mode = True
+        log("🎯 Restricted mode ON — battles skipped")
+        await client.send_message("me", "🎯 Restricted mode ON — I'll only handle trades, captures, wizard puzzles, and monster groups. Battles are skipped.")
+
+    elif text == "/mode full":
+        restricted_mode = False
+        log("⚔️ Full mode ON — battles resumed")
+        await client.send_message("me", "⚔️ Full mode ON — back to normal, battles included.")
+
+    elif text == "/mode":
+        await client.send_message("me", f"Current mode: {'restricted (no battles)' if restricted_mode else 'full'}\nUse /mode restricted or /mode full to switch.")
 
     elif text.startswith("/count"):
         parts = text.split()
