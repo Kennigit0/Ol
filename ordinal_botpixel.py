@@ -56,12 +56,17 @@ def get_btns(m):
                 out.append(b.text)
     return out
 
+def strip_accents(s):
+    """Strip accent/diacritic marks (e.g. 'Ệngage' -> 'Engage') — the game
+    sometimes obfuscates button labels this way."""
+    return "".join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
+
 def has_btn(bl, keyword):
-    return any(keyword.lower() in b.lower() for b in bl)
+    return any(keyword.lower() in strip_accents(b).lower() for b in bl)
 
 def get_btn_idx(bl, keyword):
     for i, b in enumerate(bl):
-        if keyword.lower() in b.lower():
+        if keyword.lower() in strip_accents(b).lower():
             return i
     return 0
 
@@ -1033,9 +1038,16 @@ async def process(m):
     # ── Engage ───────────────────────────────────────────────
     SKIP_BUTTONS = {"collections", "artifacts", "details", "prestige", "essences",
                     "show ability", "rope", "net", "chain", "tranquilizer"}
+    BATTLE_KEYWORDS = {"engage", "attack", "shield", "ultimate", "small attack",
+                        "swap", "escape", "fight"}
+
     if len(btns) >= 1:
-        if btns[0].lower() in SKIP_BUTTONS:
+        first_norm = strip_accents(btns[0]).lower()
+        if first_norm in SKIP_BUTTONS:
             log(f"Skipping: {btns[0]}")
+            return
+        if restricted_mode and any(kw in first_norm for kw in BATTLE_KEYWORDS):
+            log(f"[RESTRICTED] Skipping battle button: {btns[0]}")
             return
         log("Engage! clicking index 0")
         await safe_click(m, 0)
