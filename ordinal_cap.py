@@ -14,6 +14,10 @@ CAPTURE_LIST = [
     "gelarxia", "drion", "gemwave", "apharon", "frost", "Xceynerite"
 ]
 
+# Any pet sighting containing one of these emoji gets captured,
+# regardless of name (e.g. "You saw Apharon🔥!", "...Froghare🏝!")
+CAPTURE_EMOJIS = {"🏝", "🔥"}
+
 KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 
 MAX_PEARL_PRICE  = 250
@@ -63,19 +67,46 @@ def get_btn_idx(bl, keyword):
             return i
     return 0
 
-def should_capture(m):
+def is_monster_dead(m):
+    """Empty-button confirmation messages (trade done, item found, spell broken,
+    etc.) that mean it's safe to keep exploring."""
+    if get_btns(m):
+        return False
     text = (m.text or "").lower()
+    return any(k in text for k in [
+        "gelarxia", "also found", "traded", "rejected",
+        "you broke free from the spell", "stole", "continue your journey",
+    ])
+
+def should_capture(m):
+    raw = m.text or ""
+    text = raw.lower()
     for name in CAPTURE_LIST:
         if re.search(r'\b' + re.escape(name.lower()) + r'\b', text):
             return True
+    if any(e in raw for e in CAPTURE_EMOJIS):
+        return True
     return False
 
 def get_matched_capture_name(m):
-    """Which CAPTURE_LIST entry matched this message — for notification text."""
-    text = (m.text or "").lower()
+    """Which creature matched — by CAPTURE_LIST name, or by capture-emoji
+    (in which case we pull the word immediately before the emoji, since
+    the name itself isn't on any fixed list)."""
+    raw = m.text or ""
+    text = raw.lower()
     for name in CAPTURE_LIST:
         if re.search(r'\b' + re.escape(name.lower()) + r'\b', text):
             return name
+    for e in CAPTURE_EMOJIS:
+        idx = raw.find(e)
+        if idx != -1:
+            j = idx
+            while j > 0 and raw[j-1].isalnum():
+                j -= 1
+            name = raw[j:idx].strip()
+            if name:
+                return name
+            return f"pet ({e})"
     return None
 
 def is_buy_reject(btns):
@@ -782,6 +813,12 @@ async def process_msg(m):
         reset_last_action()
         return
 
+    # ── Monster dead / trade done / item found (no buttons) ──
+    if is_monster_dead(m):
+        log("Monster dead! Exploring...")
+        await explore()
+        return
+
     # ── Trader: Buy it / Reject it ────────────────────────────
     if is_buy_reject(btns):
         decision = check_trader_offer(text)
@@ -894,8 +931,8 @@ async def watchdog():
         await asyncio.sleep(10)
         if not bot_running or wizard_active or monster_paused:
             last_action_time = time.time()
-            continue 
-        if time.time() - last_action_time > 3:
+            continue
+        if time.time() - last_action_time > 60:
             log("Stuck! Sending /explore...")
             await explore()
 

@@ -17,6 +17,10 @@ CAPTURE_LIST = [
     "gelarxia", "drion", "gemwave", "apharon", "frost", "Xceynerite"
 ]
 
+# Any pet sighting containing one of these emoji gets captured,
+# regardless of name (e.g. "You saw Apharon🔥!", "...Froghare🏝!")
+CAPTURE_EMOJIS = {"🏝", "🔥"}
+
 KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 
 # ── Ultimate move names (add more as you discover) ────────────
@@ -91,18 +95,34 @@ def needs_fight(m):
     return "enemy to defeat" in text or "do /fight" in text
 
 def should_capture(m):
-    text = (m.text or "").lower()
+    raw = m.text or ""
+    text = raw.lower()
     for name in CAPTURE_LIST:
         if re.search(r'\b' + re.escape(name) + r'\b', text):
             return True
+    if any(e in raw for e in CAPTURE_EMOJIS):
+        return True
     return False
 
 def get_matched_capture_name(m):
-    """Which CAPTURE_LIST entry matched this message — for notification text."""
-    text = (m.text or "").lower()
+    """Which creature matched — by CAPTURE_LIST name, or by capture-emoji
+    (in which case we pull the word immediately before the emoji, since
+    the name itself isn't on any fixed list)."""
+    raw = m.text or ""
+    text = raw.lower()
     for name in CAPTURE_LIST:
         if re.search(r'\b' + re.escape(name) + r'\b', text):
             return name
+    for e in CAPTURE_EMOJIS:
+        idx = raw.find(e)
+        if idx != -1:
+            j = idx
+            while j > 0 and raw[j-1].isalnum():
+                j -= 1
+            name = raw[j:idx].strip()
+            if name:
+                return name
+            return f"pet ({e})"
     return None
 
 def log(msg):
