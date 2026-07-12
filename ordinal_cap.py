@@ -4,9 +4,9 @@ import cv2
 from telethon import TelegramClient, events
 from telethon.tl.types import ReplyInlineMarkup, MessageEntityUnderline
 
-API_ID   = 33562154        # your api_id from my.telegram.org
-API_HASH = "7bea846c20a8c4c10d48b8ab26610d51"       # your api_hash from my.telegram.org
-PHONE    = "+917859846782"       # your phone number eg: +91XXXXXXXXXX
+API_ID   = 39455771
+API_HASH = "0150c2e270dfcf0f3cfdfdce8f0a7a49"
+PHONE    = "+917990952611"
 BOT      = "OrdinalLegacyBot"
 
 CAPTURE_LIST = [
@@ -19,7 +19,7 @@ KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 MAX_PEARL_PRICE  = 250
 MAX_TICKET_PRICE = 450
 
-client = TelegramClient("ordinalspike_session", API_ID, API_HASH)
+client = TelegramClient("ordinalepic_session", API_ID, API_HASH)
 
 last_action_time = 0
 monster_paused    = False
