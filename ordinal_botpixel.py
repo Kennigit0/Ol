@@ -48,6 +48,7 @@ wizard_last_click = 0
 monster_current_hash  = None  # ahash of the image currently being solved
 monster_last_guess    = None  # count value most recently clicked, for registration on success
 monster_pending_image = None  # raw bytes of the most recent monster-group screenshot, for /count
+monster_refight_count = 0     # consecutive re-fights after 2 failed tries, safety cap below
 
 # ─────────────────────────────────────────────────────────────
 
@@ -766,7 +767,7 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
-    global monster_current_hash, monster_last_guess, monster_pending_image
+    global monster_current_hash, monster_last_guess, monster_pending_image, monster_refight_count
     global bot_running
 
     if not bot_running:
@@ -855,15 +856,27 @@ async def process(m):
                         return
                 log(f"[MONSTER GROUP] No button for retry guess {next_guess}")
 
-        # 2 tries used up OR no more candidates → stop bot
-        bot_running = False
+        # 2 tries used up OR no more candidates → re-fight for a fresh group
         monster_group_msg  = None
         monster_candidates = []
         monster_tried      = set()
         monster_current_hash = None
         monster_last_guess   = None
-        log("🛑 2 tries failed — Bot stopped!")
-        await client.send_message("me", "🛑 Monster group: 2 tries failed!\nAnswer manually then send /resume to restart bot.")
+
+        monster_refight_count += 1
+        if monster_refight_count <= 5:
+            log(f"[MONSTER GROUP] 2 tries failed — re-fighting for a new group ({monster_refight_count}/5)")
+            await asyncio.sleep(1)
+            await client.send_message(BOT, "/fight")
+            reset_last_action()
+            return
+
+        # Safety net — too many consecutive failures in a row, something's
+        # probably genuinely wrong (not just bad luck), so stop and ask.
+        bot_running = False
+        monster_refight_count = 0
+        log("🛑 5 re-fights in a row failed — Bot stopped!")
+        await client.send_message("me", "🛑 Monster group: failed 5 times in a row!\nSomething may be off — check manually, then send /resume.")
         reset_last_action()
         return
 
@@ -877,6 +890,7 @@ async def process(m):
         monster_current_hash = None
         monster_last_guess   = None
         monster_paused      = False
+        monster_refight_count = 0
         reset_last_action()
         return
 
