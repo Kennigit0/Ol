@@ -172,8 +172,11 @@ HASH_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monste
 # looser check.
 AHASH_MAX_DIST = 15   # out of 256 bits
 PHASH_MAX_DIST = 10   # out of 64 bits — stricter, since pHash is more discriminating
-AMBIGUITY_GAP  = 6    # if the 2nd-best match (different count) is within this many
-                       # bits of the best match, treat it as too close to call
+# Ambiguity gap as a normalized RATIO (not raw bits) — comparisons can mix
+# ahash-only legacy entries (256-bit scale) with ahash+phash entries
+# (64-bit phash scale), so the gap has to be computed in the same
+# normalized space as _distance() uses, not a fixed bit count.
+AMBIGUITY_GAP_RATIO = 0.025   # ≈ 6/256 on the ahash scale, ≈ 1.6/64 on the phash scale
 
 def ahash_bytes(image_bytes, size=16):
     """16x16 average-hash — cheap fingerprint of overall brightness pattern."""
@@ -262,9 +265,11 @@ def lookup_hash_library(image_bytes):
     best_entry, best_dist = matches[0]
 
     # Ambiguity check: if a DIFFERENT count is nearly as close a match,
-    # refuse to trust it rather than risk a wrong auto-click.
+    # refuse to trust it rather than risk a wrong auto-click. Compared
+    # directly in normalized-ratio space so it's consistent whether the
+    # best/second-best entries used ahash or phash for their distance.
     for entry, dist in matches[1:]:
-        if entry["count"] != best_entry["count"] and (dist - best_dist) * 256 <= AMBIGUITY_GAP:
+        if entry["count"] != best_entry["count"] and (dist - best_dist) <= AMBIGUITY_GAP_RATIO:
             log(f"[HASH LIB] Ambiguous match — count={best_entry['count']} (dist={best_dist:.3f}) "
                 f"vs count={entry['count']} (dist={dist:.3f}) too close to call. Falling back to counting.")
             return None, query
@@ -281,7 +286,15 @@ def register_hash_library(query_hashes, count):
 
     for e in entries:
         if e["count"] == count and _is_match(query_hashes, e):
-            return  # already have this one
+            # Legacy entry (ahash-only) matched — upgrade it in place with
+            # a pHash now that we have one, instead of just skipping it.
+            # This is how the whole library gradually gains pHash coverage
+            # through normal play, with zero data loss and no manual re-work.
+            if not e.get("phash") and query_hashes.get("phash"):
+                e["phash"] = query_hashes["phash"]
+                save_hash_library(entries)
+                log(f"[HASH LIB] Upgraded legacy entry (count={count}) with pHash")
+            return
 
     # Flag (but don't block) conflicts — a close match with a DIFFERENT
     # count likely means an existing entry was mislabeled at some point,
