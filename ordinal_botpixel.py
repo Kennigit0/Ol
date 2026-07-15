@@ -1,4 +1,4 @@
-import asyncio, time, re, random, requests, base64, io, os, subprocess, unicodedata
+import asyncio, time, re, random, requests, base64, io, os, subprocess, unicodedata, json
 import numpy as np
 import cv2
 from PIL import Image
@@ -45,7 +45,7 @@ wizard_key        = {}
 wizard_last_done  = None
 wizard_last_click = 0
 
-monster_current_hash  = None  # ahash of the image currently being solved
+monster_current_hash  = None  # {hash, phash} of the image currently being solved
 monster_last_guess    = None  # count value most recently clicked, for registration on success
 monster_pending_image = None  # raw bytes of the most recent monster-group screenshot, for /count
 monster_refight_count = 0     # consecutive re-fights after 2 failed tries, safety cap below
@@ -165,10 +165,22 @@ async def explore():
     await client.send_message(BOT, "/explore")
 
 HASH_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monster_hash_library.json")
-HASH_MATCH_MAX_DIST = 15   # out of 256 bits — same render ≈ 0-5, different count/monster ≈ 100+
+
+# ahash alone is a coarse fingerprint (brightness pattern only) — fine for a
+# small library, but collision risk grows as more entries pile up, especially
+# since these screenshots share a lot of visual similarity (same ocean/sky
+# background, similar card layouts). pHash (DCT-based, captures actual
+# structure/frequency content, not just brightness) is added as a second,
+# more discriminating check for anything registered from now on. Legacy
+# entries that only have an ahash still work — they just get the older,
+# looser check.
+AHASH_MAX_DIST = 15   # out of 256 bits
+PHASH_MAX_DIST = 10   # out of 64 bits — stricter, since pHash is more discriminating
+AMBIGUITY_GAP  = 6    # if the 2nd-best match (different count) is within this many
+                       # bits of the best match, treat it as too close to call
 
 def ahash_bytes(image_bytes, size=16):
-    """16x16 average-hash — cheap fingerprint of a screenshot's exact visual layout."""
+    """16x16 average-hash — cheap fingerprint of overall brightness pattern."""
     img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
     gray = cv2.imdecode(img_arr, cv2.IMREAD_GRAYSCALE)
     if gray is None:
@@ -176,8 +188,31 @@ def ahash_bytes(image_bytes, size=16):
     small = cv2.resize(gray, (size, size))
     avg = small.mean()
     bits = (small > avg).flatten()
-    # pack bits into a hex string for compact JSON storage
     return "".join("1" if b else "0" for b in bits)
+
+def phash_bytes(image_bytes, size=32, hash_size=8):
+    """DCT-based perceptual hash — captures actual image structure (edges,
+    layout) rather than just overall brightness, so it's much better at
+    telling apart two screenshots that happen to have similar brightness
+    but genuinely different card layouts."""
+    img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    gray = cv2.imdecode(img_arr, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return None
+    small = cv2.resize(gray, (size, size)).astype(np.float32)
+    dct = cv2.dct(small)
+    block = dct[:hash_size, :hash_size].flatten()[1:]
+    avg = block.mean()
+    bits = (block > avg)
+    return "".join("1" if b else "0" for b in bits)
+
+def compute_hashes(image_bytes):
+    """Compute both fingerprints for an image at once."""
+    a = ahash_bytes(image_bytes)
+    p = phash_bytes(image_bytes)
+    if a is None:
+        return None
+    return {"hash": a, "phash": p}
 
 def hamming(hash_a, hash_b):
     return sum(a != b for a, b in zip(hash_a, hash_b))
@@ -186,7 +221,6 @@ def load_hash_library():
     if not os.path.exists(HASH_LIB_PATH):
         return []
     try:
-        import json
         with open(HASH_LIB_PATH, "r") as f:
             return json.load(f)
     except Exception as e:
@@ -195,39 +229,72 @@ def load_hash_library():
 
 def save_hash_library(entries):
     try:
-        import json
         with open(HASH_LIB_PATH, "w") as f:
             json.dump(entries, f)
     except Exception as e:
         log(f"[HASH LIB] Save error: {e}")
 
-def lookup_hash_library(image_bytes):
-    """Return (count, matched_hash) if a known screenshot matches closely enough, else (None, hash)."""
-    h = ahash_bytes(image_bytes)
-    if h is None:
-        return None, None
-    entries = load_hash_library()
-    best = None
-    best_dist = HASH_MATCH_MAX_DIST + 1
-    for e in entries:
-        d = hamming(h, e["hash"])
-        if d < best_dist:
-            best_dist = d
-            best = e["count"]
-    if best is not None:
-        log(f"[HASH LIB] Match found — count={best} (dist={best_dist}/256)")
-    return best, h
+def _is_match(query, entry):
+    """True if query hashes are close enough to this library entry.
+    Uses pHash when both sides have it (stricter, more reliable); falls
+    back to ahash-only for legacy entries that predate pHash."""
+    if query.get("phash") and entry.get("phash"):
+        return hamming(query["phash"], entry["phash"]) <= PHASH_MAX_DIST
+    return hamming(query["hash"], entry["hash"]) <= AHASH_MAX_DIST
 
-def register_hash_library(image_hash, count):
-    """Save a confirmed-correct (hash, count) pair so future identical screenshots skip counting entirely."""
-    if image_hash is None or count is None:
+def _distance(query, entry):
+    """Single comparable distance score for ranking (0-1 normalized)."""
+    if query.get("phash") and entry.get("phash"):
+        return hamming(query["phash"], entry["phash"]) / 64
+    return hamming(query["hash"], entry["hash"]) / 256
+
+def lookup_hash_library(image_bytes):
+    """Return (count, query_hashes) if a known screenshot matches closely
+    enough AND unambiguously, else (None, query_hashes)."""
+    query = compute_hashes(image_bytes)
+    if query is None:
+        return None, None
+
+    entries = load_hash_library()
+    matches = [(e, _distance(query, e)) for e in entries if _is_match(query, e)]
+    if not matches:
+        return None, query
+
+    matches.sort(key=lambda x: x[1])
+    best_entry, best_dist = matches[0]
+
+    # Ambiguity check: if a DIFFERENT count is nearly as close a match,
+    # refuse to trust it rather than risk a wrong auto-click.
+    for entry, dist in matches[1:]:
+        if entry["count"] != best_entry["count"] and (dist - best_dist) * 256 <= AMBIGUITY_GAP:
+            log(f"[HASH LIB] Ambiguous match — count={best_entry['count']} (dist={best_dist:.3f}) "
+                f"vs count={entry['count']} (dist={dist:.3f}) too close to call. Falling back to counting.")
+            return None, query
+
+    log(f"[HASH LIB] Match found — count={best_entry['count']} (dist={best_dist:.3f})")
+    return best_entry["count"], query
+
+def register_hash_library(query_hashes, count):
+    """Save a confirmed-correct (hashes, count) pair so future identical
+    screenshots skip counting entirely."""
+    if query_hashes is None or count is None:
         return
     entries = load_hash_library()
-    # avoid saving near-duplicates of something already stored with the same count
+
     for e in entries:
-        if e["count"] == count and hamming(image_hash, e["hash"]) < 5:
-            return
-    entries.append({"hash": image_hash, "count": count})
+        if e["count"] == count and _is_match(query_hashes, e):
+            return  # already have this one
+
+    # Flag (but don't block) conflicts — a close match with a DIFFERENT
+    # count likely means an existing entry was mislabeled at some point,
+    # since this new one was just confirmed correct by the game itself.
+    for e in entries:
+        if e["count"] != count and _is_match(query_hashes, e):
+            log(f"[HASH LIB] ⚠️ Conflict — new count={count} closely matches an existing "
+                f"count={e['count']} entry. One of them may be mislabeled — worth checking "
+                f"with check_dupe.py.")
+
+    entries.append({"hash": query_hashes["hash"], "phash": query_hashes.get("phash"), "count": count})
     save_hash_library(entries)
     log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
 
@@ -1104,8 +1171,8 @@ async def on_self(event):
         if monster_pending_image is None:
             await client.send_message("me", "No pending monster-group image to label — this only works right after a group appears.")
             return
-        h = ahash_bytes(monster_pending_image)
-        register_hash_library(h, count)
+        hashes = compute_hashes(monster_pending_image)
+        register_hash_library(hashes, count)
         monster_pending_image = None
         log(f"[HASH LIB] Manually registered via /count — count={count}")
         await client.send_message("me", f"✅ Saved — count={count}. I'll recognize this layout next time.")

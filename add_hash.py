@@ -14,6 +14,9 @@ import numpy as np
 
 LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monster_hash_library.json")
 
+AHASH_MAX_DIST = 15   # out of 256 bits
+PHASH_MAX_DIST = 10   # out of 64 bits — stricter, since pHash is more discriminating
+
 def ahash_bytes(image_bytes, size=16):
     img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
     gray = cv2.imdecode(img_arr, cv2.IMREAD_GRAYSCALE)
@@ -24,8 +27,32 @@ def ahash_bytes(image_bytes, size=16):
     bits = (small > avg).flatten()
     return "".join("1" if b else "0" for b in bits)
 
+def phash_bytes(image_bytes, size=32, hash_size=8):
+    img_arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    gray = cv2.imdecode(img_arr, cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return None
+    small = cv2.resize(gray, (size, size)).astype(np.float32)
+    dct = cv2.dct(small)
+    block = dct[:hash_size, :hash_size].flatten()[1:]
+    avg = block.mean()
+    bits = (block > avg)
+    return "".join("1" if b else "0" for b in bits)
+
+def compute_hashes(image_bytes):
+    a = ahash_bytes(image_bytes)
+    p = phash_bytes(image_bytes)
+    if a is None:
+        return None
+    return {"hash": a, "phash": p}
+
 def hamming(a, b):
     return sum(x != y for x, y in zip(a, b))
+
+def is_match(query, entry):
+    if query.get("phash") and entry.get("phash"):
+        return hamming(query["phash"], entry["phash"]) <= PHASH_MAX_DIST
+    return hamming(query["hash"], entry["hash"]) <= AHASH_MAX_DIST
 
 def load_library():
     if not os.path.exists(LIB_PATH):
@@ -55,8 +82,8 @@ def main():
     with open(img_path, "rb") as f:
         data = f.read()
 
-    h = ahash_bytes(data)
-    if h is None:
+    query = compute_hashes(data)
+    if query is None:
         print("Could not read image — is it a valid jpg/png?")
         sys.exit(1)
 
@@ -64,16 +91,15 @@ def main():
 
     # warn if this looks like a near-duplicate of an existing entry with a DIFFERENT count
     for e in entries:
-        d = hamming(h, e["hash"])
-        if d < 15 and e["count"] != count:
-            print(f"⚠️  Warning: this screenshot is very close (dist={d}) to an existing "
+        if is_match(query, e) and e["count"] != count:
+            print(f"⚠️  Warning: this screenshot closely matches an existing "
                   f"entry with count={e['count']}, but you're adding count={count}. "
                   f"Double check you're not mislabeling.")
-        if d < 5 and e["count"] == count:
+        if is_match(query, e) and e["count"] == count:
             print(f"Already have a near-identical entry with count={count} — skipping duplicate.")
             sys.exit(0)
 
-    entries.append({"hash": h, "count": count})
+    entries.append({"hash": query["hash"], "phash": query.get("phash"), "count": count})
     save_library(entries)
     print(f"✅ Added — count={count}. Library size is now {len(entries)}.")
 
