@@ -48,7 +48,6 @@ wizard_last_click = 0
 monster_current_hash  = None  # {hash, phash} of the image currently being solved
 monster_last_guess    = None  # count value most recently clicked, for registration on success
 monster_pending_image = None  # raw bytes of the most recent monster-group screenshot, for /count
-monster_refight_count = 0     # consecutive re-fights after 2 failed tries, safety cap below
 
 # ─────────────────────────────────────────────────────────────
 
@@ -537,14 +536,23 @@ def extract_line_symbol(line):
     return None
 
 
-def looks_like_scrambled_word(token, target_word):
-    """Anagram-tolerant check — same letters, similar length, any order.
-    Needed because obfuscation sometimes scrambles the trigger word itself
-    (e.g. 'ignore' -> 'negrIo') rather than just the move names."""
+def looks_like_scrambled_word(token, target_word, threshold=0.75):
+    """Dice-coefficient fuzzy match — tolerant of reordering AND inserted/
+    extra characters, not just pure anagram scrambling. Needed because
+    obfuscation sometimes scrambles the trigger word itself in different
+    ways ('ignore' -> 'negrIo' is a reorder, 'IgnoTrEe' has extra letters
+    inserted), not just move names."""
+    from collections import Counter
     t = re.sub(r'[^a-z]', '', token.lower())
-    if abs(len(t) - len(target_word)) > 1:
+    if len(t) < 2:
         return False
-    return sorted(t) == sorted(target_word)
+    if not (len(target_word) - 2 <= len(t) <= len(target_word) + 5):
+        return False
+    t_counter = Counter(t)
+    target_counter = Counter(target_word)
+    matches = sum(min(t_counter[c], target_counter[c]) for c in target_counter)
+    score = (2 * matches) / (len(t) + len(target_word))
+    return score >= threshold
 
 def get_ignore_emojis(text):
     ignore = set()
@@ -847,7 +855,7 @@ async def process(m):
     global last_action_time, last_battle_msg, ultimate_count
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
-    global monster_current_hash, monster_last_guess, monster_pending_image, monster_refight_count
+    global monster_current_hash, monster_last_guess, monster_pending_image
     global bot_running
 
     if not bot_running:
@@ -936,27 +944,24 @@ async def process(m):
                         return
                 log(f"[MONSTER GROUP] No button for retry guess {next_guess}")
 
-        # 2 tries used up OR no more candidates → re-fight for a fresh group
+        # Send the actual failed image so a /count reply can teach it,
+        # then stop and wait for you rather than guessing again blind.
+        if monster_pending_image:
+            tried_str = ", ".join(str(t) for t in sorted(monster_tried)) if monster_tried else "?"
+            await client.send_file(
+                "me", monster_pending_image,
+                caption=f"❌ Both guesses wrong for this layout (tried: {tried_str}).\n"
+                        f"Reply /count <n> with the real answer to teach me, then /resume."
+            )
+
+        bot_running = False
         monster_group_msg  = None
         monster_candidates = []
         monster_tried      = set()
         monster_current_hash = None
         monster_last_guess   = None
-
-        monster_refight_count += 1
-        if monster_refight_count <= 5:
-            log(f"[MONSTER GROUP] 2 tries failed — re-fighting for a new group ({monster_refight_count}/5)")
-            await asyncio.sleep(1)
-            await client.send_message(BOT, "/fight")
-            reset_last_action()
-            return
-
-        # Safety net — too many consecutive failures in a row, something's
-        # probably genuinely wrong (not just bad luck), so stop and ask.
-        bot_running = False
-        monster_refight_count = 0
-        log("🛑 5 re-fights in a row failed — Bot stopped!")
-        await client.send_message("me", "🛑 Monster group: failed 5 times in a row!\nSomething may be off — check manually, then send /resume.")
+        log("🛑 2 tries failed — Bot stopped!")
+        await client.send_message("me", "🛑 Monster group: 2 tries failed!\nAnswer manually then send /resume to restart bot.")
         reset_last_action()
         return
 
@@ -970,7 +975,6 @@ async def process(m):
         monster_current_hash = None
         monster_last_guess   = None
         monster_paused      = False
-        monster_refight_count = 0
         reset_last_action()
         return
 
