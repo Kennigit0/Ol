@@ -307,6 +307,51 @@ def register_hash_library(query_hashes, count):
     entries.append({"hash": query_hashes["hash"], "phash": query_hashes.get("phash"), "count": count})
     save_hash_library(entries)
     log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
+    clear_hash_miss(query_hashes)
+
+# ── Miss tracking — how many DISTINCT unregistered layouts are still
+#    outstanding, so there's a visible sense of "how much is left to cover" ──
+MISS_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monster_hash_misses.json")
+
+def load_hash_misses():
+    if not os.path.exists(MISS_LIB_PATH):
+        return []
+    try:
+        with open(MISS_LIB_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        log(f"[HASH MISSES] Load error: {e}")
+        return []
+
+def save_hash_misses(entries):
+    try:
+        with open(MISS_LIB_PATH, "w") as f:
+            json.dump(entries, f)
+    except Exception as e:
+        log(f"[HASH MISSES] Save error: {e}")
+
+def record_hash_miss(query_hashes):
+    """Track a distinct unregistered layout that was just counted instead
+    of matched. Deduplicated so repeat sightings of the same unregistered
+    layout don't inflate the tally."""
+    if query_hashes is None:
+        return
+    misses = load_hash_misses()
+    for e in misses:
+        if _is_match(query_hashes, e):
+            return  # already tracked
+    misses.append({"hash": query_hashes["hash"], "phash": query_hashes.get("phash")})
+    save_hash_misses(misses)
+    log(f"[HASH MISSES] New unregistered layout tracked (total outstanding: {len(misses)})")
+
+def clear_hash_miss(query_hashes):
+    """Once a layout gets registered, it's no longer 'outstanding' — drop
+    it from the miss tally if it was being tracked."""
+    misses = load_hash_misses()
+    remaining = [e for e in misses if not _is_match(query_hashes, e)]
+    if len(remaining) != len(misses):
+        save_hash_misses(remaining)
+        log(f"[HASH MISSES] Cleared — {len(misses) - len(remaining)} outstanding entr(y/ies) now covered")
 
 def count_monsters_no_ai(image_bytes, max_count=12):
     """
@@ -887,6 +932,7 @@ async def process_msg(m):
                 log(f"[MONSTER GROUP] Hash library hit — count={lib_count} (no counting needed)")
                 candidates = [lib_count]
             else:
+                record_hash_miss(current_hash)
                 candidates = count_monsters_no_ai(image_bytes, max_count=max_count)
 
         if candidates:
@@ -1013,6 +1059,16 @@ async def on_self(event):
         monster_pending_image = None
         log(f"[HASH LIB] Manually registered via /count — count={count}")
         await client.send_message("me", f"✅ Saved — count={count}. I'll recognize this layout next time.")
+
+    elif text == "/misses":
+        registered = len(load_hash_library())
+        outstanding = len(load_hash_misses())
+        await client.send_message(
+            "me",
+            f"📊 Hash library: {registered} registered layout(s)\n"
+            f"🕳️ Outstanding: {outstanding} distinct unregistered layout(s) seen so far\n\n"
+            f"Outstanding ones get counted (less reliably) until you /count them."
+        )
 
 # ══════════════════════════════════════════════════════════════
 #  LISTENERS
