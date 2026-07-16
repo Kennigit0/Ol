@@ -1,4 +1,4 @@
-import asyncio, time, re, random, os, unicodedata, json, subprocess
+import asyncio, time, re, random, os, unicodedata, json, subprocess, io
 import numpy as np
 import cv2
 from telethon import TelegramClient, events
@@ -154,6 +154,13 @@ async def explore():
     global last_action_time
     last_action_time = time.time()
     await client.send_message(BOT, "/explore")
+
+def as_photo_file(image_bytes, name="monster_group.jpg"):
+    """Wrap raw bytes with a filename so Telethon knows it's a JPEG and
+    Telegram shows it as a viewable photo instead of an unnamed document."""
+    f = io.BytesIO(image_bytes)
+    f.name = name
+    return f
 
 # ══════════════════════════════════════════════════════════════
 #  MONSTER-GROUP COUNTING — hash library (no AI)
@@ -875,7 +882,7 @@ async def process_msg(m):
         if monster_pending_image:
             tried_str = ", ".join(str(t) for t in sorted(monster_tried)) if monster_tried else "?"
             await client.send_file(
-                "me", monster_pending_image,
+                "me", as_photo_file(monster_pending_image),
                 caption=f"❌ Both guesses wrong for this layout (tried: {tried_str}).\n"
                         f"Reply /count <n> with the real answer to teach me, then /resume."
             )
@@ -955,7 +962,7 @@ async def process_msg(m):
             log("⚠️ Counting failed — Bot paused!")
             caption = "⚠️ Monster group counting failed! Answer manually, then send /count <n> so I remember it, then /resume."
             if image_bytes:
-                await client.send_file("me", image_bytes, caption=caption)
+                await client.send_file("me", as_photo_file(image_bytes), caption=caption)
             else:
                 await client.send_message("me", caption)
         reset_last_action()
