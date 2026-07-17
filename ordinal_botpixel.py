@@ -27,13 +27,14 @@ KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 ULTIMATE_NAMES = {
     "ultimate", "sword of motion", "cero", "fist",
     "gran rey cero", "getsuga tensho", "bankai", "shunko",
-    "final flash", "spirit gun", "rose whip", "dark flame",
+    "final flash", "spirit gun", "rose whip", "dark flame", "mugetsu",
 }
 
 client           = TelegramClient("ordinalepic_session", API_ID, API_HASH)
 last_action_time = 0
 last_battle_msg  = None
 ultimate_count = 0
+ichigo_bankai_used = False   # tracks the Bankai -> Mugetsu combo, per battle
 
 monster_paused    = False
 bot_running       = True   # /stop sets this False, bot ignores everything
@@ -904,7 +905,7 @@ async def handle_wizard(msg):
 # ══════════════════════════════════════════════════════════════
 
 async def process(m):
-    global last_action_time, last_battle_msg, ultimate_count
+    global last_action_time, last_battle_msg, ultimate_count, ichigo_bankai_used
     global wizard_active, wizard_key, wizard_last_done
     global monster_paused, monster_group_msg, monster_candidates, monster_tried
     global monster_current_hash, monster_last_guess, monster_pending_image
@@ -1117,8 +1118,27 @@ async def process(m):
         log("Monster dead! Exploring...")
         last_battle_msg = None
         ultimate_count  = 0
+        ichigo_bankai_used = False
         await explore()
         return
+
+    # ── Ichigo combo: Bankai first, then Mugetsu ──────────────
+    if "ichigo" in text:
+        if not ichigo_bankai_used and has_btn(bl, "bankai"):
+            last_battle_msg = m
+            idx = get_btn_idx(bl, "bankai")
+            ichigo_bankai_used = True
+            ultimate_count += 1
+            log(f"Ichigo combo: Bankai! idx={idx}")
+            await safe_click(m, idx)
+            return
+        if ichigo_bankai_used and has_btn(bl, "mugetsu"):
+            last_battle_msg = m
+            idx = get_btn_idx(bl, "mugetsu")
+            ultimate_count += 1
+            log(f"Ichigo combo: Mugetsu! idx={idx}")
+            await safe_click(m, idx)
+            return
 
     # ── Ultimate (max 1x) ────────────────────────────────────
     if has_ultimate(bl) and ultimate_count < 2:
