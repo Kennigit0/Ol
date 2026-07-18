@@ -688,6 +688,29 @@ def parse_wizard_key(msg_or_text):
     """
     from telethon.tl.types import MessageEntityUnderline
 
+    def utf16_range_to_str_indices(text, utf16_offset, utf16_length):
+        """Telegram reports entity offset/length in UTF-16 code units, not
+        Python string indices. Since these messages are full of emoji
+        (some needing 2+ UTF-16 units each) appearing BEFORE the key
+        section, treating the raw offset as a direct string index drifts
+        out of alignment — silently pointing at the wrong character and
+        making underline detection fail entirely. Convert properly."""
+        start_idx, end_idx = None, None
+        units = 0
+        target_end = utf16_offset + utf16_length
+        for i, ch in enumerate(text):
+            if units == utf16_offset:
+                start_idx = i
+            if units == target_end:
+                end_idx = i
+                break
+            units += 2 if ord(ch) > 0xFFFF else 1
+        if start_idx is None:
+            start_idx = len(text)
+        if end_idx is None:
+            end_idx = len(text)
+        return start_idx, end_idx
+
     # ── Underline entity detection ──────────────────────────────
     if hasattr(msg_or_text, 'entities'):
         text     = msg_or_text.text or ""
@@ -695,7 +718,8 @@ def parse_wizard_key(msg_or_text):
         underlined_pos = set()
         for ent in (entities or []):
             if isinstance(ent, MessageEntityUnderline):
-                for i in range(ent.offset, ent.offset + ent.length):
+                start_idx, end_idx = utf16_range_to_str_indices(text, ent.offset, ent.length)
+                for i in range(start_idx, end_idx):
                     underlined_pos.add(i)
         if underlined_pos:
             result = {}
@@ -734,8 +758,9 @@ def parse_wizard_key(msg_or_text):
             continue
 
         # Format: CODE = ScrambledMove  or  CODE - ScrambledMove
-        # (no IGNORECASE on code part — keeps code/move boundary exact)
-        m = re.match(r'^([A-Z0-9]{4,8})\s*[=\-]\s*(\S.{2,20})$', line)
+        # Codes have appeared both as short all-caps (e.g. '6AYZ8W') and
+        # longer mixed-case (e.g. 'kj3xVLuv8lql') — accept both.
+        m = re.match(r'^([A-Za-z0-9]{4,14})\s*[=\-]\s*(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -744,7 +769,7 @@ def parse_wizard_key(msg_or_text):
                 continue
 
         # Format: CODE space ScrambledMove
-        m = re.match(r'^([A-Z0-9]{4,8})\s+(\S.{2,20})$', line)
+        m = re.match(r'^([A-Za-z0-9]{4,14})\s+(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -754,12 +779,12 @@ def parse_wizard_key(msg_or_text):
 
         # Format: CODEScrambledMove (no separator — try every possible split
         # point and keep whichever gives the HIGHEST fuzzy match score, since
-        # both the code and a capitalized move-start are uppercase letters)
+        # both the code and a capitalized move-start can look similar)
         best_split = None
         best_split_score = 0
-        for split in range(4, min(9, len(line) - 1)):
+        for split in range(4, min(15, len(line) - 1)):
             code_part, move_part = line[:split], line[split:]
-            if not re.match(r'^[A-Z0-9]+$', code_part):
+            if not re.match(r'^[A-Za-z0-9]+$', code_part):
                 continue
             if not re.match(r'^[A-Za-z]', move_part):
                 continue

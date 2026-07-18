@@ -593,13 +593,37 @@ def parse_wizard_key(msg_or_text):
     CODE Move, and CODEMove (no separator). Only scans lines after "tell you
     that" to avoid the wizard's taunt sentence being mistaken for a move.
     """
+    def utf16_range_to_str_indices(text, utf16_offset, utf16_length):
+        """Telegram reports entity offset/length in UTF-16 code units, not
+        Python string indices. Since these messages are full of emoji
+        (some needing 2+ UTF-16 units each) appearing BEFORE the key
+        section, treating the raw offset as a direct string index drifts
+        out of alignment — silently pointing at the wrong character and
+        making underline detection fail entirely. Convert properly."""
+        start_idx, end_idx = None, None
+        units = 0
+        target_end = utf16_offset + utf16_length
+        for i, ch in enumerate(text):
+            if units == utf16_offset:
+                start_idx = i
+            if units == target_end:
+                end_idx = i
+                break
+            units += 2 if ord(ch) > 0xFFFF else 1
+        if start_idx is None:
+            start_idx = len(text)
+        if end_idx is None:
+            end_idx = len(text)
+        return start_idx, end_idx
+
     if hasattr(msg_or_text, 'entities'):
         text     = msg_or_text.text or ""
         entities = msg_or_text.entities or []
         underlined_pos = set()
         for ent in (entities or []):
             if isinstance(ent, MessageEntityUnderline):
-                for i in range(ent.offset, ent.offset + ent.length):
+                start_idx, end_idx = utf16_range_to_str_indices(text, ent.offset, ent.length)
+                for i in range(start_idx, end_idx):
                     underlined_pos.add(i)
         if underlined_pos:
             result = {}
@@ -635,7 +659,7 @@ def parse_wizard_key(msg_or_text):
         if any(p in line for p in [',', '!', '?', ';']):
             continue
 
-        m = re.match(r'^([A-Z0-9]{4,8})\s*[=\-]\s*(\S.{2,20})$', line)
+        m = re.match(r'^([A-Za-z0-9]{4,14})\s*[=\-]\s*(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -643,7 +667,7 @@ def parse_wizard_key(msg_or_text):
                 result[move] = code
                 continue
 
-        m = re.match(r'^([A-Z0-9]{4,8})\s+(\S.{2,20})$', line)
+        m = re.match(r'^([A-Za-z0-9]{4,14})\s+(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -653,9 +677,9 @@ def parse_wizard_key(msg_or_text):
 
         best_split = None
         best_split_score = 0
-        for split in range(4, min(9, len(line) - 1)):
+        for split in range(4, min(15, len(line) - 1)):
             code_part, move_part = line[:split], line[split:]
-            if not re.match(r'^[A-Z0-9]+$', code_part):
+            if not re.match(r'^[A-Za-z0-9]+$', code_part):
                 continue
             if not re.match(r'^[A-Za-z]', move_part):
                 continue
