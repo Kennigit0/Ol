@@ -21,6 +21,20 @@ CAPTURE_LIST = [
 # regardless of name (e.g. "You saw Apharon🔥!", "...Froghare🏝!")
 CAPTURE_EMOJIS = {"🏝", "🔥"}
 
+# Every documented Common and Rare pet name (from Ordinal Legacy Pet Guide 2.0).
+# Any sighting whose name ISN'T in this list is presumed Epic or higher
+# (including undocumented Exotic/Super Rare pets with no known name yet)
+# and gets captured too — no need to know the name in advance.
+KNOWN_COMMON_RARE_NAMES = {
+    # Common
+    "dionysus", "ugla", "bastet", "drake", "asclepius", "sciurus", "felpis", "cinco", "nightingle",
+    "fillow", "breary", "owlhog", "shadoweyes", "feline paw", "embertail", "capnolithyl", "dragoth", "larham",
+    "saphira", "falkor", "breezy", "glassterint", "pikura", "crawstar", "jelloww", "bobo", "zevrat",
+    # Rare
+    "sagara", "scriper", "froghare", "honeydripper", "mymphy",
+    "oculus hex", "rosy whisker", "dilong", "hyxallian", "durafin",
+}
+
 KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 
 # ── Ultimate move names (add more as you discover) ────────────
@@ -95,6 +109,13 @@ def needs_fight(m):
     text = (m.text or "").lower()
     return "enemy to defeat" in text or "do /fight" in text
 
+def extract_pet_name(raw_text):
+    """Pull the pet's name out of a sighting message like 'You saw X!' or
+    'You tracked down X!' — used to check it against the known Common/Rare
+    list, since anything NOT on that list is presumed Epic or higher."""
+    m = re.search(r'(?:saw|tracked down)\s+([A-Za-z][A-Za-z ]*?)(?:[^\w\s]|$)', raw_text, re.IGNORECASE)
+    return m.group(1).strip() if m else None
+
 def should_capture(m):
     raw = m.text or ""
     text = raw.lower()
@@ -103,12 +124,16 @@ def should_capture(m):
             return True
     if any(e in raw for e in CAPTURE_EMOJIS):
         return True
+    # Unrecognized name (not documented as Common or Rare) — presumed
+    # Epic/Exotic/Super Rare, capture it even without knowing it by name.
+    name = extract_pet_name(raw)
+    if name and name.lower() not in KNOWN_COMMON_RARE_NAMES:
+        return True
     return False
 
 def get_matched_capture_name(m):
-    """Which creature matched — by CAPTURE_LIST name, or by capture-emoji
-    (in which case we pull the word immediately before the emoji, since
-    the name itself isn't on any fixed list)."""
+    """Which creature matched — by CAPTURE_LIST name, by capture-emoji, or
+    by having a name that isn't on the known Common/Rare list."""
     raw = m.text or ""
     text = raw.lower()
     for name in CAPTURE_LIST:
@@ -124,6 +149,9 @@ def get_matched_capture_name(m):
             if name:
                 return name
             return f"pet ({e})"
+    name = extract_pet_name(raw)
+    if name and name.lower() not in KNOWN_COMMON_RARE_NAMES:
+        return f"{name} (unrecognized — likely Epic+)"
     return None
 
 def log(msg):
