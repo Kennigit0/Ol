@@ -14,9 +14,15 @@ CAPTURE_LIST = [
     "gelarxia", "drion", "gemwave", "apharon", "frost", "Xceynerite"
 ]
 
-# Any pet sighting containing one of these emoji gets captured,
-# regardless of name (e.g. "You saw Apharon🔥!", "...Froghare🏝!")
-CAPTURE_EMOJIS = {"🏝", "🔥"}
+# Any pet sighting containing one of these emoji gets captured
+# UNCONDITIONALLY (any rarity), regardless of name (e.g. "You saw Apharon🔥!")
+CAPTURE_EMOJIS = {"🔥"}
+
+# Pet sightings with these emoji are ONLY captured if the pet is also
+# Epic+ (i.e. its name isn't on the known Common/Rare list). All Common/Rare
+# pets of this type are already caught, so skip re-capturing them.
+# (e.g. "You saw Froghare🏝!" — Froghare is Rare -> skip; unrecognized name -> capture)
+EPIC_ONLY_EMOJIS = {"🏝"}
 
 # Every documented Common and Rare pet name (from Ordinal Legacy Pet Guide 2.0).
 # Any sighting whose name ISN'T in this list is presumed Epic or higher
