@@ -895,7 +895,16 @@ async def process_msg(m):
         return
 
     # ── Wizard key leak ──────────────────────────────────────
-    if "would never tell" in text or "tell you that" in text:
+    # Trigger on the underline entities themselves (not just specific taunt
+    # phrases like "would never tell" / "tell you that"), since the game
+    # uses multiple different wordings for this reveal message (e.g. "The
+    # underlined letter or number is the corresponding key to the move").
+    # Relying on exact phrase text is brittle; the underline formatting
+    # itself is the reliable signal that this message carries the key.
+    has_underline = any(
+        isinstance(e, MessageEntityUnderline) for e in (getattr(m, 'entities', None) or [])
+    )
+    if "would never tell" in text or "tell you that" in text or has_underline:
         new_key = parse_wizard_key(m)
         if new_key:
             wizard_key = new_key

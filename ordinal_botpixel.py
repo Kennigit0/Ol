@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 from PIL import Image
 from telethon import TelegramClient, events
-from telethon.tl.types import ReplyInlineMarkup
+from telethon.tl.types import ReplyInlineMarkup, MessageEntityUnderline
 
 API_ID   = 39455771
 API_HASH = "0150c2e270dfcf0f3cfdfdce8f0a7a49"
@@ -1016,7 +1016,16 @@ async def process(m):
         return
 
     # ── Wizard key leak ──────────────────────────────────────
-    if "would never tell" in text or "tell you that" in text:
+    # Trigger on the underline entities themselves (not just specific taunt
+    # phrases like "would never tell" / "tell you that"), since the game
+    # uses multiple different wordings for this reveal message (e.g. "The
+    # underlined letter or number is the corresponding key to the move").
+    # Relying on exact phrase text is brittle; the underline formatting
+    # itself is the reliable signal that this message carries the key.
+    has_underline = any(
+        isinstance(e, MessageEntityUnderline) for e in (getattr(m, 'entities', None) or [])
+    )
+    if "would never tell" in text or "tell you that" in text or has_underline:
         new_key = parse_wizard_key(m)
         if new_key:
             wizard_key = new_key
