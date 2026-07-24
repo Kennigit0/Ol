@@ -175,14 +175,30 @@ def reset_last_action():
     global last_action_time
     last_action_time = time.time()
 
-async def safe_click(m, idx):
+async def safe_click(m, idx, retries=2):
+    """Attempt to click a button by index. Retries with a freshly re-fetched
+    copy of the message if the click fails, since the click sometimes throws
+    (stale message reference, expired button, flood wait, etc) and previously
+    that failure was swallowed silently — leaving the bot stuck waiting on a
+    click that never actually happened, until you clicked manually. Returns
+    True only if a click actually landed."""
     await asyncio.sleep(random.uniform(0.3, 1.2))
-    try:
-        await m.click(idx)
-        return True
-    except Exception as e:
-        log(f"Click error: {e}")
-        return False
+    cur = m
+    for attempt in range(retries + 1):
+        try:
+            await cur.click(idx)
+            return True
+        except Exception as e:
+            log(f"Click error (attempt {attempt + 1}/{retries + 1}): {e}")
+            if attempt < retries:
+                await asyncio.sleep(1.0)
+                try:
+                    fresh = await client.get_messages(BOT, ids=cur.id)
+                    if fresh:
+                        cur = fresh
+                except Exception:
+                    pass
+    return False
 
 async def explore():
     global last_action_time
@@ -823,13 +839,11 @@ async def handle_wizard(msg):
         if btn:
             idx = next((j for j, b in enumerate(btns) if b == btn), None)
             if idx is not None:
-                await safe_click(fresh, idx)
-                clicked = True
+                clicked = await safe_click(fresh, idx)
     else:
         idx = match_move_to_btn(move, btns)
         if idx is not None:
-            await safe_click(fresh, idx)
-            clicked = True
+            clicked = await safe_click(fresh, idx)
 
     reset_last_action()
     if clicked:
