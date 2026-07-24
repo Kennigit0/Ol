@@ -4,10 +4,12 @@ import cv2
 from telethon import TelegramClient, events
 from telethon.tl.types import ReplyInlineMarkup, MessageEntityUnderline
 
-API_ID   = 39455771
-API_HASH = "0150c2e270dfcf0f3cfdfdce8f0a7a49"
-PHONE    = "+917990952611"
-BOT      = "OrdinalLegacyBot"
+API_ID       = int(os.environ.get("TG_API_ID", 39455771))
+API_HASH     = os.environ.get("TG_API_HASH", "0150c2e270dfcf0f3cfdfdce8f0a7a49")
+PHONE        = os.environ.get("TG_PHONE", "+917990952611")
+BOT          = os.environ.get("TG_BOT_USERNAME", "OrdinalLegacyBot")
+SESSION_NAME = os.environ.get("TG_SESSION_NAME", "ordinalepic_session")
+ACCOUNT_TAG  = os.environ.get("ACCOUNT_TAG", "")  # optional label shown in logs, e.g. "acc1"
 
 CAPTURE_LIST = [
     "aurelite", "violet coil", "moon nyc", "sunphiny",
@@ -43,7 +45,7 @@ KNOWN_MOVES = {"attack", "small attack", "ultimate", "shield", "small"}
 MAX_PEARL_PRICE  = 250
 MAX_TICKET_PRICE = 450
 
-client = TelegramClient("ordinalepic_session", API_ID, API_HASH)
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 last_action_time = 0
 monster_paused    = False
@@ -169,7 +171,8 @@ def check_trader_offer(text):
     return "reject"
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+    tag = f"[{ACCOUNT_TAG}] " if ACCOUNT_TAG else ""
+    print(f"{tag}[{time.strftime('%H:%M:%S')}] {msg}")
 
 def reset_last_action():
     global last_action_time
@@ -217,6 +220,22 @@ def as_photo_file(image_bytes, name="monster_group.jpg"):
 # ══════════════════════════════════════════════════════════════
 
 HASH_LIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monster_hash_library.json")
+HASH_LIB_LOCK_PATH = HASH_LIB_PATH + ".lock"
+
+import contextlib
+import fcntl
+
+@contextlib.contextmanager
+def hash_library_lock():
+    """Cross-process advisory lock so two account processes sharing this
+    same hash library file can't corrupt it (or silently lose each other's
+    writes) by reading/modifying/writing at the same time."""
+    with open(HASH_LIB_LOCK_PATH, "w") as lockfile:
+        fcntl.flock(lockfile, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lockfile, fcntl.LOCK_UN)
 
 # ahash alone is a coarse fingerprint (brightness pattern only) — fine for a
 # small library, but collision risk grows as more entries pile up, especially
@@ -338,32 +357,33 @@ def register_hash_library(query_hashes, count):
     screenshots skip counting entirely."""
     if query_hashes is None or count is None:
         return
-    entries = load_hash_library()
+    with hash_library_lock():
+        entries = load_hash_library()
 
-    for e in entries:
-        if e["count"] == count and _is_match(query_hashes, e):
-            # Legacy entry (ahash-only) matched — upgrade it in place with
-            # a pHash now that we have one, instead of just skipping it.
-            # This is how the whole library gradually gains pHash coverage
-            # through normal play, with zero data loss and no manual re-work.
-            if not e.get("phash") and query_hashes.get("phash"):
-                e["phash"] = query_hashes["phash"]
-                save_hash_library(entries)
-                log(f"[HASH LIB] Upgraded legacy entry (count={count}) with pHash")
-            return
+        for e in entries:
+            if e["count"] == count and _is_match(query_hashes, e):
+                # Legacy entry (ahash-only) matched — upgrade it in place with
+                # a pHash now that we have one, instead of just skipping it.
+                # This is how the whole library gradually gains pHash coverage
+                # through normal play, with zero data loss and no manual re-work.
+                if not e.get("phash") and query_hashes.get("phash"):
+                    e["phash"] = query_hashes["phash"]
+                    save_hash_library(entries)
+                    log(f"[HASH LIB] Upgraded legacy entry (count={count}) with pHash")
+                return
 
-    # Flag (but don't block) conflicts — a close match with a DIFFERENT
-    # count likely means an existing entry was mislabeled at some point,
-    # since this new one was just confirmed correct by the game itself.
-    for e in entries:
-        if e["count"] != count and _is_match(query_hashes, e):
-            log(f"[HASH LIB] ⚠️ Conflict — new count={count} closely matches an existing "
-                f"count={e['count']} entry. One of them may be mislabeled — worth checking "
-                f"with check_dupe.py.")
+        # Flag (but don't block) conflicts — a close match with a DIFFERENT
+        # count likely means an existing entry was mislabeled at some point,
+        # since this new one was just confirmed correct by the game itself.
+        for e in entries:
+            if e["count"] != count and _is_match(query_hashes, e):
+                log(f"[HASH LIB] ⚠️ Conflict — new count={count} closely matches an existing "
+                    f"count={e['count']} entry. One of them may be mislabeled — worth checking "
+                    f"with check_dupe.py.")
 
-    entries.append({"hash": query_hashes["hash"], "phash": query_hashes.get("phash"), "count": count})
-    save_hash_library(entries)
-    log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
+        entries.append({"hash": query_hashes["hash"], "phash": query_hashes.get("phash"), "count": count})
+        save_hash_library(entries)
+        log(f"[HASH LIB] Registered new entry — count={count} (library size={len(entries)})")
     clear_hash_miss(query_hashes)
 
 # ── Miss tracking — how many DISTINCT unregistered layouts are still

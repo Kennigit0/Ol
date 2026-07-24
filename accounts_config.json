@@ -1,0 +1,18 @@
+[
+  {
+    "tag": "acc1",
+    "script": "ordinal_cap.py",
+    "TG_API_ID": "39455771",
+    "TG_API_HASH": "0150c2e270dfcf0f3cfdfdce8f0a7a49",
+    "TG_PHONE": "+917990952611",
+    "TG_SESSION_NAME": "ordinalepic_session_acc1"
+  },
+  {
+    "tag": "acc2",
+    "script": "ordinal_cap.py",
+    "TG_API_ID": "REPLACE_WITH_ACCOUNT2_API_ID",
+    "TG_API_HASH": "REPLACE_WITH_ACCOUNT2_API_HASH",
+    "TG_PHONE": "REPLACE_WITH_ACCOUNT2_PHONE",
+    "TG_SESSION_NAME": "ordinalepic_session_acc2"
+  }
+]
