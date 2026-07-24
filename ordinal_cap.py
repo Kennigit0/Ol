@@ -182,7 +182,7 @@ async def safe_click(m, idx, retries=2):
     that failure was swallowed silently — leaving the bot stuck waiting on a
     click that never actually happened, until you clicked manually. Returns
     True only if a click actually landed."""
-    await asyncio.sleep(random.uniform(0.3, 1.2))
+    await asyncio.sleep(random.uniform(0.2, 0.6))
     cur = m
     for attempt in range(retries + 1):
         try:
@@ -824,7 +824,13 @@ async def handle_wizard(msg):
         log(f"[WIZARD] Move not found for emoji '{emoji}'")
         return
 
-    await asyncio.sleep(random.uniform(1.0, 5.0))
+    # Short wait before re-fetching + clicking. This used to be 1-5s, which
+    # was slow enough that the user would manually tap the button themselves
+    # before this fired — the bot's click then landed on an already-consumed
+    # button (no exception, so it logged a false "✓ Clicked" even though the
+    # user's tap was what actually advanced the game). Keeping this brief
+    # minimizes that race while still letting the message settle.
+    await asyncio.sleep(random.uniform(0.2, 0.6))
     reset_last_action()
     try:
         fresh = await client.get_messages(BOT, ids=msg.id)
