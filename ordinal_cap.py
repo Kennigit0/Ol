@@ -538,21 +538,37 @@ def normalize_symbol(s):
         if c == "\u200d" or unicodedata.category(c) not in ("Mn", "Cf")
     )
 
+def extract_symbol_cluster(cleaned):
+    """
+    Given text already run through normalize_symbol, pull exactly ONE
+    grapheme cluster: a base non-ASCII character, optionally extended by
+    (ZWJ + non-ASCII character) pairs. Shared by extract_line_symbol and
+    get_target_emoji so both sides of a symbol match go through identical
+    logic — otherwise a doubled/decorated reference on one side (e.g. a
+    "[♠♠]" list entry) could fail to match a plain single reference on the
+    other (e.g. "this Relic [♠] symbol"), or vice versa.
+    """
+    m = re.search(r'[^\x00-\x7F](?:\u200d[^\x00-\x7F])*', cleaned)
+    return m.group(0) if m else None
+
 def extract_line_symbol(line):
     """
     Pull the actual choice-symbol out of a sequence line directly, without
     relying on bracket punctuation — it's been observed missing, reversed,
     prefixed with stray characters, and collapsed empty across different
     obfuscation variants, but the symbol character itself is always present.
-    Captures the FULL contiguous run of non-ASCII characters as one symbol
-    (not just its first codepoint), since some symbols are multi-codepoint
-    compound/ligatured emoji (e.g. "eye in speech bubble" 👁️‍🗨️) that would
-    otherwise get truncated down to a single unrelated-looking character.
+
+    Captures exactly ONE grapheme cluster (see extract_symbol_cluster): a
+    true ZWJ-compound emoji (e.g. "eye in speech bubble" 👁️‍🗨️, which
+    renders as two separate-looking glyphs but is structurally one symbol
+    joined by U+200D) stays whole, while a separate, merely-adjacent repeat
+    of a simple symbol (e.g. "♠♠", two independent spade characters used
+    for visual emphasis) collapses to the single "♠" used elsewhere.
     """
     cleaned = normalize_symbol(line)
-    m = re.search(r'[^\x00-\x7F]+', cleaned)
-    if m:
-        return m.group(0)
+    symbol = extract_symbol_cluster(cleaned)
+    if symbol:
+        return symbol
 
     m = re.search(r'[\[\s]([+\-*^~])[\]\s]', line)
     if m:
@@ -607,7 +623,8 @@ def is_ignored(emoji, ignore_set):
 
 def get_target_emoji(text, emoji_map=None):
     def clean(s):
-        return normalize_symbol(s.strip('[](){}><|!. '))
+        stripped = normalize_symbol(s.strip('[](){}><|!. '))
+        return extract_symbol_cluster(stripped) or stripped
 
     for m in re.finditer(r'(\S+)\s+s\w*mbol', text, re.IGNORECASE):
         c = clean(m.group(1))
