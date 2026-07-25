@@ -956,7 +956,16 @@ async def process_msg(m):
                 return
 
     # ── Wizard step ──────────────────────────────────────────
-    if "mystic wizard" in text or "evil mystic wizard" in text or "draziw" in text:
+    # Match on "wizard" alone, not the exact phrase "mystic wizard" / "evil
+    # mystic wizard" — the game's obfuscation scrambles surrounding words too
+    # (e.g. "mystic" -> "mcyits"), which broke the old phrase-based check.
+    # When that happens this branch never ran at all: no emoji/move lookup,
+    # no click attempt, nothing logged — the bot just sat there stuck
+    # forever. "wizard" itself has stayed intact in every observed case even
+    # when words around it get scrambled; fuzzy-match it too as a fallback
+    # in case that's ever not true.
+    if ("wizard" in text or "draziw" in text
+            or any(looks_like_scrambled_word(tok, "wizard") for tok in re.findall(r'\S+', text))):
         wizard_active = True
         await handle_wizard(m)
         return
