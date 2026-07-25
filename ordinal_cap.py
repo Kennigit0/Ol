@@ -527,10 +527,16 @@ def match_scrambled_move(text):
     return move
 
 def normalize_symbol(s):
-    """Strip invisible variation-selector/combining-mark characters (e.g. U+FE0F).
-    The game's scrambling can reorder these relative to the base character even
-    though it looks visually identical, which breaks exact-string matching."""
-    return "".join(c for c in s if unicodedata.category(c) not in ("Mn", "Cf"))
+    """Strip invisible variation-selector/combining-mark characters (e.g. U+FE0F)
+    and stray format characters — but KEEP zero-width joiners (U+200D). ZWJ is
+    structural to compound/ligatured emoji (e.g. "eye in speech bubble" 👁️‍🗨️,
+    which renders as two separate-looking glyphs on fonts without the ligature).
+    Stripping it splits one symbol into two disconnected characters, which then
+    fails to match the same symbol elsewhere in the message."""
+    return "".join(
+        c for c in s
+        if c == "\u200d" or unicodedata.category(c) not in ("Mn", "Cf")
+    )
 
 def extract_line_symbol(line):
     """
@@ -538,15 +544,15 @@ def extract_line_symbol(line):
     relying on bracket punctuation — it's been observed missing, reversed,
     prefixed with stray characters, and collapsed empty across different
     obfuscation variants, but the symbol character itself is always present.
+    Captures the FULL contiguous run of non-ASCII characters as one symbol
+    (not just its first codepoint), since some symbols are multi-codepoint
+    compound/ligatured emoji (e.g. "eye in speech bubble" 👁️‍🗨️) that would
+    otherwise get truncated down to a single unrelated-looking character.
     """
-    non_ascii = [c for c in line if ord(c) > 127]
-    filtered = [c for c in non_ascii if unicodedata.category(c) not in ("Mn", "Cf")]
-    if filtered:
-        seen = []
-        for c in filtered:
-            if c not in seen:
-                seen.append(c)
-        return seen[0]
+    cleaned = normalize_symbol(line)
+    m = re.search(r'[^\x00-\x7F]+', cleaned)
+    if m:
+        return m.group(0)
 
     m = re.search(r'[\[\s]([+\-*^~])[\]\s]', line)
     if m:
@@ -626,7 +632,7 @@ def get_target_emoji(text, emoji_map=None):
 
 def get_move_for_emoji(text, emoji):
     for line in text.split('\n'):
-        if emoji in line and "'" in line:
+        if emoji in normalize_symbol(line) and "'" in line:
             moves = re.findall(r"'([^']+)'", line)
             for raw in moves:
                 m = raw.strip().lower()
