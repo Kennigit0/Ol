@@ -1083,10 +1083,18 @@ async def process(m):
     # When that happens this branch never ran at all: no emoji/move lookup,
     # no click attempt, nothing logged — the bot just sat there stuck
     # forever. "wizard" itself has stayed intact in every observed case even
-    # when words around it get scrambled; fuzzy-match it too as a fallback
-    # in case that's ever not true.
-    if ("wizard" in text or "draziw" in text
-            or any(looks_like_scrambled_word(tok, "wizard") for tok in re.findall(r'\S+', text))):
+    # when words around it get scrambled, so a plain substring check
+    # (plus the fully-reversed "draziw" case) is sufficient.
+    #
+    # NOTE: a fuzzy/Dice-coefficient fallback was tried here and removed —
+    # it false-positived on unrelated words that happen to share most of the
+    # same letters as "wizard" by coincidence (e.g. the trader NPC name
+    # "darwin" scores 0.833, well past a 0.75 threshold), which incorrectly
+    # blocked normal exploring/trading any time that name came up. Don't
+    # re-add a fuzzy match here without a much higher, carefully-tested
+    # threshold and confirmed real-world evidence that "wizard" itself
+    # actually gets scrambled (not just words around it).
+    if "wizard" in text or "draziw" in text:
         wizard_active = True
         await handle_wizard(m)
         return
