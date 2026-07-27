@@ -745,7 +745,15 @@ def parse_wizard_key(msg_or_text):
     result = {}
     unresolved_lines = []
 
-    # Pass 1: lines with an unambiguous separator between code and move name.
+    # Pass 1: ONLY lines with an unambiguous '='/'-' separator between code
+    # and move name are trusted immediately. A plain single SPACE is
+    # deliberately NOT treated as unambiguous — a move name can itself
+    # contain a space (e.g. "Small Attack"), and the game's obfuscation can
+    # land its one stray space INSIDE that move name instead of at the true
+    # code/move boundary (observed for real: "PHJZ8JSmUall A.ttack" is code
+    # "PHJZ8J" + garbled "Small Attack", but naively splitting on the only
+    # space present gives the wrong code "PHJZ8JSmUall"). Route those
+    # through the same cross-checked search as fully-fused lines below.
     for line in lines[start_idx:]:
         line = line.strip()
         if not line or len(line) < 5 or len(line) > 40:
@@ -754,14 +762,6 @@ def parse_wizard_key(msg_or_text):
             continue
 
         m = re.match(r'^([A-Za-z0-9]{4,14})\s*[=\-]\s*(\S.{2,20})$', line)
-        if m:
-            code, scrambled = m.group(1), m.group(2).strip()
-            move = match_scrambled_move(scrambled)
-            if move and move not in result:
-                result[move] = code
-                continue
-
-        m = re.match(r'^([A-Za-z0-9]{4,14})\s+(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -786,18 +786,19 @@ def parse_wizard_key(msg_or_text):
         lens = Counter(len(c) for c in result.values())
         expected_len = lens.most_common(1)[0][0]
 
-    # Pass 2: fused no-separator lines. Require an exact code-length match
-    # against pass 1's reference if we have one; only fall back to the
-    # highest-scoring split (the old behavior) if no split hits that length
-    # or no reference is available yet.
+    # Pass 2: everything else — fully-fused lines AND single-space lines
+    # pass 1 didn't trust. Try every plausible split point, allowing
+    # move_part to optionally start with a run of spaces (so a genuine
+    # "CODE Move" single-space case still resolves correctly here too).
     for line in unresolved_lines:
         best_split = None
         best_split_score = 0
         exact_len_split = None
         for split in range(4, min(15, len(line) - 1)):
-            code_part, move_part = line[:split], line[split:]
+            code_part, move_part_raw = line[:split], line[split:]
             if not re.match(r'^[A-Za-z0-9]+$', code_part):
                 continue
+            move_part = move_part_raw.lstrip(' ')
             if not re.match(r'^[A-Za-z]', move_part):
                 continue
             move, score = match_scrambled_move_scored(move_part)

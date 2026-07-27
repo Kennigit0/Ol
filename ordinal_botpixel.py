@@ -841,12 +841,22 @@ def parse_wizard_key(msg_or_text):
     result = {}
     unresolved_lines = []
 
-    # Pass 1: lines with an unambiguous separator between code and move name.
-    # These are trustworthy as-is and also tell us how long a code normally
-    # is in THIS particular key reveal (codes have appeared as short
-    # all-caps like '6AYZ8W' and longer mixed-case like 'kj3xVLuv8lql', so
-    # there's no universal fixed length — but all codes within one reveal
+    # Pass 1: ONLY lines with an unambiguous '='/'-' separator between code
+    # and move name are trusted immediately. These also tell us how long a
+    # code normally is in THIS particular key reveal (codes have appeared as
+    # short all-caps like '6AYZ8W' and longer mixed-case like 'kj3xVLuv8lql',
+    # so there's no universal fixed length — but all codes within one reveal
     # have matched each other's length in every case observed so far).
+    #
+    # A plain single SPACE between code and move is deliberately NOT treated
+    # as unambiguous here, even though it looks like a clean split — a move
+    # name can itself contain a space (e.g. "Small Attack"), and the game's
+    # obfuscation can land the one stray space it keeps INSIDE that move
+    # name instead of at the true code/move boundary (observed for real:
+    # "PHJZ8JSmUall A.ttack" is code "PHJZ8J" + garbled "Small Attack", but
+    # naively splitting on the only space present gives the wrong code
+    # "PHJZ8JSmUall"). Route those through the same cross-checked search as
+    # fully-fused lines below instead of trusting them blindly.
     for line in lines[start_idx:]:
         line = line.strip()
         if not line or len(line) < 5 or len(line) > 40:
@@ -857,15 +867,6 @@ def parse_wizard_key(msg_or_text):
 
         # Format: CODE = ScrambledMove  or  CODE - ScrambledMove
         m = re.match(r'^([A-Za-z0-9]{4,14})\s*[=\-]\s*(\S.{2,20})$', line)
-        if m:
-            code, scrambled = m.group(1), m.group(2).strip()
-            move = match_scrambled_move(scrambled)
-            if move and move not in result:
-                result[move] = code
-                continue
-
-        # Format: CODE space ScrambledMove
-        m = re.match(r'^([A-Za-z0-9]{4,14})\s+(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
             move = match_scrambled_move(scrambled)
@@ -891,20 +892,24 @@ def parse_wizard_key(msg_or_text):
         lens = Counter(len(c) for c in result.values())
         expected_len = lens.most_common(1)[0][0]
 
-    # Pass 2: lines with no separator at all — code and garbled move name
-    # fused together (e.g. "W2XDYEUeltlimaate"). Try every plausible split
-    # point; if we know the expected code length from pass 1, require an
-    # exact-length match to win outright, only falling back to the
-    # highest-scoring split (the old behavior) if no split hits that length
-    # or no reference length is available yet.
+    # Pass 2: everything else — fully-fused lines (no separator at all, e.g.
+    # "W2XDYEUeltlimaate") AND single-space lines that pass 1 didn't trust.
+    # Try every plausible split point, allowing move_part to optionally
+    # start with a run of spaces (so a genuine "CODE Move" single-space case
+    # still resolves correctly here too, just via the same cross-checked
+    # path instead of a separate blind fast-path). If we know the expected
+    # code length from pass 1, require an exact-length match to win
+    # outright, only falling back to the highest-scoring split (the old
+    # behavior) if no split hits that length or no reference is available.
     for line in unresolved_lines:
         best_split = None
         best_split_score = 0
         exact_len_split = None
         for split in range(4, min(15, len(line) - 1)):
-            code_part, move_part = line[:split], line[split:]
+            code_part, move_part_raw = line[:split], line[split:]
             if not re.match(r'^[A-Za-z0-9]+$', code_part):
                 continue
+            move_part = move_part_raw.lstrip(' ')
             if not re.match(r'^[A-Za-z]', move_part):
                 continue
             move, score = match_scrambled_move_scored(move_part)
