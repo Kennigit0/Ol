@@ -160,8 +160,24 @@ def get_matched_capture_name(m):
         return f"{name} (unrecognized — likely Epic+)"
     return None
 
+LOG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "botpixel_log.txt")
+
+# Start fresh every time the bot launches — truncate rather than append, so
+# old runs don't pile up and the file always reflects just this session.
+try:
+    with open(LOG_FILE_PATH, "w") as _f:
+        _f.write(f"=== Log started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+except Exception:
+    pass
+
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line)
+    try:
+        with open(LOG_FILE_PATH, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 def reset_last_action():
     global last_action_time
