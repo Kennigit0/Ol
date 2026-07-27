@@ -760,6 +760,7 @@ def parse_wizard_key(msg_or_text):
     taunt sentence (e.g. "Wizard krrr...") being mistaken for a move.
     """
     from telethon.tl.types import MessageEntityUnderline
+    from collections import Counter
 
     def utf16_range_to_str_indices(text, utf16_offset, utf16_length):
         """Telegram reports entity offset/length in UTF-16 code units, not
@@ -822,6 +823,14 @@ def parse_wizard_key(msg_or_text):
             break
 
     result = {}
+    unresolved_lines = []
+
+    # Pass 1: lines with an unambiguous separator between code and move name.
+    # These are trustworthy as-is and also tell us how long a code normally
+    # is in THIS particular key reveal (codes have appeared as short
+    # all-caps like '6AYZ8W' and longer mixed-case like 'kj3xVLuv8lql', so
+    # there's no universal fixed length — but all codes within one reveal
+    # have matched each other's length in every case observed so far).
     for line in lines[start_idx:]:
         line = line.strip()
         if not line or len(line) < 5 or len(line) > 40:
@@ -831,8 +840,6 @@ def parse_wizard_key(msg_or_text):
             continue
 
         # Format: CODE = ScrambledMove  or  CODE - ScrambledMove
-        # Codes have appeared both as short all-caps (e.g. '6AYZ8W') and
-        # longer mixed-case (e.g. 'kj3xVLuv8lql') — accept both.
         m = re.match(r'^([A-Za-z0-9]{4,14})\s*[=\-]\s*(\S.{2,20})$', line)
         if m:
             code, scrambled = m.group(1), m.group(2).strip()
@@ -850,11 +857,34 @@ def parse_wizard_key(msg_or_text):
                 result[move] = code
                 continue
 
-        # Format: CODEScrambledMove (no separator — try every possible split
-        # point and keep whichever gives the HIGHEST fuzzy match score, since
-        # both the code and a capitalized move-start can look similar)
+        unresolved_lines.append(line)
+
+    # The expected code length for this reveal, learned from pass 1. Used to
+    # disambiguate pass 2 below — without this, picking whichever split
+    # scores highest in isolation is unreliable: a truncated slice missing
+    # some of the move-name's letters can spuriously score HIGHER than the
+    # correct full split, purely as an artifact of the Dice-coefficient
+    # formula rewarding closer length ratios over completeness. This was
+    # observed for real: "W2XDYEUeltlimaate" (code "W2XDYE" + garbled
+    # "Ueltlimaate") scored 0.842 at the correct split, but the truncated
+    # "tlimaate" (dropping "Uel" onto the code side by mistake) scored
+    # higher at 0.875 and won under pure highest-score selection — producing
+    # a corrupted 9-character code that could never match any real button.
+    expected_len = None
+    if result:
+        lens = Counter(len(c) for c in result.values())
+        expected_len = lens.most_common(1)[0][0]
+
+    # Pass 2: lines with no separator at all — code and garbled move name
+    # fused together (e.g. "W2XDYEUeltlimaate"). Try every plausible split
+    # point; if we know the expected code length from pass 1, require an
+    # exact-length match to win outright, only falling back to the
+    # highest-scoring split (the old behavior) if no split hits that length
+    # or no reference length is available yet.
+    for line in unresolved_lines:
         best_split = None
         best_split_score = 0
+        exact_len_split = None
         for split in range(4, min(15, len(line) - 1)):
             code_part, move_part = line[:split], line[split:]
             if not re.match(r'^[A-Za-z0-9]+$', code_part):
@@ -862,11 +892,17 @@ def parse_wizard_key(msg_or_text):
             if not re.match(r'^[A-Za-z]', move_part):
                 continue
             move, score = match_scrambled_move_scored(move_part)
-            if move and score > best_split_score:
+            if not move:
+                continue
+            if expected_len is not None and len(code_part) == expected_len:
+                exact_len_split = (move, code_part)
+            if score > best_split_score:
                 best_split_score = score
                 best_split = (move, code_part)
-        if best_split:
-            move, code = best_split
+
+        chosen = exact_len_split or best_split
+        if chosen:
+            move, code = chosen
             if move not in result:
                 result[move] = code
 
