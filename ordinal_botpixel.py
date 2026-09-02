@@ -1151,7 +1151,13 @@ async def process(m):
     # re-add a fuzzy match here without a much higher, carefully-tested
     # threshold and confirmed real-world evidence that "wizard" itself
     # actually gets scrambled (not just words around it).
-    if "wizard" in text or "draziw" in text:
+    # Exclude known monster-name collisions (e.g. "Wizard Goblin" spawn
+    # messages) and require actual puzzle buttons to be present — without
+    # this, a false match here sets wizard_active=True with nothing to
+    # ever reset it (handle_wizard just silently skips when there are no
+    # buttons), permanently stalling the bot via the "Block during wizard"
+    # branch below.
+    if ("wizard" in text or "draziw" in text) and "wizard goblin" not in text and btns:
         wizard_active = True
         await handle_wizard(m)
         return
